@@ -1,0 +1,313 @@
+//
+//  ClusterERPView.swift
+//  DENNIS
+//
+//  Shown when a TF×SF factor topography is clicked. Splits that factor's
+//  spatial loading into a positive cluster (loading ≥ +threshold) and a negative
+//  cluster (loading ≤ −threshold), then plots the grand-average ERP averaged
+//  across each cluster's channels.
+//
+//  Traces can be grouped by any combination of dimensions chosen in the
+//  "Group by" selector: the within-subject Condition and/or the between-subject
+//  design factors (e.g. Twin Type, Age). Selecting Twin Type alone contrasts
+//  MZ vs DZ averaged over conditions; selecting Age × Twin Type plots each cell
+//  of the interaction. An optional checkbox shades the active temporal-factor
+//  window.
+//
+
+import SwiftUI
+
+/// One subject's per-condition ERP plus its between-subject factor levels.
+struct ClusterSubject: Identifiable {
+    let name: String
+    /// Between-subject factor levels, index-aligned with the study's factors.
+    let levels: [String]
+    /// condition name → channels × samples (references existing arrays; cheap).
+    let byCondition: [String: [[Float]]]
+    var id: String { name }
+}
+
+struct ClusterERPView: View {
+    let factor: TwoStepFactor
+    let spatialLoading: [Double]          // per channel
+    let temporalLoading: [Double]
+    let timesMS: [Double]
+    let subjects: [ClusterSubject]
+    let conditionNames: [String]
+    /// Between-subject factor names (study order).
+    let factorNames: [String]
+    let baselineSamples: Int
+    let samplingRate: Double
+
+    @Environment(AnalysisStore.self) private var store
+
+    /// Reserved dimension name for the within-subject condition split.
+    private static let conditionDimension = "Condition"
+
+    @State private var cursorSample = 0
+    @State private var posTraces: [OverlayTrace] = []
+    @State private var negTraces: [OverlayTrace] = []
+    @State private var cellOrder: [String] = []
+
+    /// Grouping + visibility live in the store so they persist across the
+    /// view rebuilds that happen when a different factor topography is clicked.
+    private var groupBy: Set<String> { store.clusterGroupBy }
+    private func isVisible(_ label: String) -> Bool {
+        store.clusterVisibleCells.map { $0.contains(label) } ?? true
+    }
+
+    private var threshold: Double { store.spatialThreshold }
+    private var positiveChannels: [Int] { spatialLoading.indices.filter { spatialLoading[$0] >= threshold } }
+    private var negativeChannels: [Int] { spatialLoading.indices.filter { spatialLoading[$0] <= -threshold } }
+
+    /// Dimensions offered in the selector: Condition + every between factor.
+    private var dimensions: [String] { [Self.conditionDimension] + factorNames }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            groupBySelector
+            cellChips
+            clusterPlot(title: "Positive cluster", channels: positiveChannels,
+                        sign: "+", traces: posTraces)
+            clusterPlot(title: "Negative cluster", channels: negativeChannels,
+                        sign: "−", traces: negTraces)
+        }
+        // Keep visibility on appear (sticky across factor clicks); only a
+        // grouping change resets which cells are shown.
+        .onAppear { rebuild(resetVisibility: false) }
+        .onChange(of: store.clusterGroupBy) { _, _ in rebuild(resetVisibility: true) }
+        .onChange(of: store.spatialThreshold) { _, _ in rebuild(resetVisibility: false) }
+    }
+
+    // MARK: - Controls
+
+    private var header: some View {
+        HStack(spacing: 14) {
+            Text("Cluster ERP · \(factor.name)").font(.subheadline.weight(.semibold))
+            Spacer()
+            Toggle("± Std. error", isOn: Binding(
+                get: { store.showStandardError },
+                set: { store.showStandardError = $0 }
+            ))
+            .toggleStyle(.checkbox).font(.caption)
+            Toggle("Highlight temporal window", isOn: Binding(
+                get: { store.highlightTemporalWindow },
+                set: { store.highlightTemporalWindow = $0 }
+            ))
+            .toggleStyle(.checkbox).font(.caption)
+            if store.highlightTemporalWindow {
+                Text("|TF| ≥").font(.caption).foregroundStyle(.secondary)
+                TextField("0.40", value: Binding(
+                    get: { store.temporalThreshold },
+                    set: { store.temporalThreshold = max(0, $0) }
+                ), format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    private var groupBySelector: some View {
+        HStack(spacing: 8) {
+            Text("Group by:").font(.caption).foregroundStyle(.secondary)
+            ForEach(dimensions, id: \.self) { dim in
+                let on = groupBy.contains(dim)
+                Button {
+                    var set = store.clusterGroupBy
+                    if on { set.remove(dim) } else { set.insert(dim) }
+                    store.clusterGroupBy = set
+                } label: {
+                    Text(dim).font(.caption)
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .background(Capsule().fill(on ? Color.accentColor.opacity(0.18)
+                                                       : Color.secondary.opacity(0.08)))
+                        .overlay(Capsule().strokeBorder(on ? Color.accentColor : .clear, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+            if groupBy.isEmpty {
+                Text("(overall average)").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var cellChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(cellOrder.enumerated()), id: \.element) { index, label in
+                    let color = OverlayWaveformView.palette[index % OverlayWaveformView.palette.count]
+                    let on = isVisible(label)
+                    Button {
+                        var set = store.clusterVisibleCells ?? Set(cellOrder)
+                        if on { set.remove(label) } else { set.insert(label) }
+                        store.clusterVisibleCells = set
+                    } label: {
+                        HStack(spacing: 5) {
+                            Capsule().fill(on ? color : Color.secondary.opacity(0.4)).frame(width: 14, height: 3)
+                            Text(label).font(.caption)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(on ? color.opacity(0.12) : Color.secondary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func clusterPlot(title: String, channels: [Int], sign: String,
+                             traces: [OverlayTrace]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\(title) · \(channels.count) ch \(sign)\(String(format: "%.2f", threshold))")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if channels.isEmpty {
+                Text("No channels in this cluster at the current threshold.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                let visible = traces.filter { isVisible($0.id) }
+                if visible.isEmpty {
+                    Text("Select at least one group above.").font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    OverlayWaveformView(
+                        traces: visible, samplingRate: samplingRate, baselineSamples: baselineSamples,
+                        showsCentroid: true, cursorSample: $cursorSample,
+                        showsStandardError: store.showStandardError, shadedMSRanges: shadedRanges
+                    )
+                    .frame(minHeight: 200)
+                }
+            }
+        }
+    }
+
+    // MARK: - Temporal window shading
+
+    private var shadedRanges: [ClosedRange<Double>] {
+        guard store.highlightTemporalWindow else { return [] }
+        let th = store.temporalThreshold
+        var ranges: [ClosedRange<Double>] = []
+        var start: Int?
+        for i in temporalLoading.indices {
+            let above = abs(temporalLoading[i]) >= th
+            if above, start == nil { start = i }
+            if !above, let s = start { ranges.append(msAt(s)...msAt(i - 1)); start = nil }
+        }
+        if let s = start { ranges.append(msAt(s)...msAt(temporalLoading.count - 1)) }
+        return ranges
+    }
+
+    private func msAt(_ i: Int) -> Double { i < timesMS.count ? timesMS[i] : Double(i) }
+
+    // MARK: - Cell construction
+
+    private struct Cell { let label: String; let subjects: [ClusterSubject]; let conditions: [String] }
+
+    private func levelOf(_ subject: ClusterSubject, _ factorName: String) -> String {
+        guard let idx = factorNames.firstIndex(of: factorName), idx < subject.levels.count else { return "?" }
+        let value = subject.levels[idx]
+        return value.isEmpty ? "Unassigned" : value
+    }
+
+    /// Build the trace cells from the current "Group by" selection.
+    private func cells() -> [Cell] {
+        let orderedBetween = factorNames.filter { groupBy.contains($0) }
+        let useCondition = groupBy.contains(Self.conditionDimension)
+
+        var keys: [String] = []
+        var byKey: [String: [ClusterSubject]] = [:]
+        for subject in subjects {
+            let key = orderedBetween.map { levelOf(subject, $0) }.joined(separator: "·")
+            if byKey[key] == nil { keys.append(key) }
+            byKey[key, default: []].append(subject)
+        }
+
+        var result: [Cell] = []
+        for key in keys {
+            let subs = byKey[key] ?? []
+            if useCondition {
+                for condition in conditionNames {
+                    let label = key.isEmpty ? condition : "\(key)·\(condition)"
+                    result.append(Cell(label: label, subjects: subs, conditions: [condition]))
+                }
+            } else {
+                result.append(Cell(label: key.isEmpty ? "Overall" : key,
+                                    subjects: subs, conditions: conditionNames))
+            }
+        }
+        return result
+    }
+
+    private func rebuild(resetVisibility: Bool) {
+        let built = cells()
+        cellOrder = built.map(\.label)
+        posTraces = built.enumerated().compactMap { makeTrace($0.element, index: $0.offset, channels: positiveChannels) }
+        negTraces = built.enumerated().compactMap { makeTrace($0.element, index: $0.offset, channels: negativeChannels) }
+        if resetVisibility {
+            store.clusterVisibleCells = nil   // nil = all cells shown
+        }
+    }
+
+    private func makeTrace(_ cell: Cell, index: Int, channels: [Int]) -> OverlayTrace? {
+        guard let stats = cellStats(cell: cell, channels: channels) else { return nil }
+        return OverlayTrace(
+            id: cell.label, label: cell.label,
+            color: OverlayWaveformView.palette[index % OverlayWaveformView.palette.count],
+            samples: [], centroid: stats.mean, contributing: stats.n, sensorLayout: nil,
+            centroidSE: stats.se
+        )
+    }
+
+    /// Mean and ±1 standard-error (across subjects) of the cluster-mean waveform.
+    /// Each subject contributes one waveform (averaged over the cell's conditions),
+    /// so the SE reflects between-subject variability — the standard ERP measure.
+    private func cellStats(cell: Cell, channels: [Int]) -> (mean: [Float], se: [Float], n: Int)? {
+        var subjectWaves: [[Float]] = []
+        for subject in cell.subjects {
+            var sum: [Float] = []
+            var k = 0
+            for condition in cell.conditions {
+                guard let samples = subject.byCondition[condition] else { continue }
+                let mean = clusterMean(samples, channels: channels)
+                guard !mean.isEmpty else { continue }
+                if sum.isEmpty { sum = [Float](repeating: 0, count: mean.count) }
+                guard sum.count == mean.count else { continue }
+                for i in 0..<mean.count { sum[i] += mean[i] }
+                k += 1
+            }
+            if k > 0 { subjectWaves.append(sum.map { $0 / Float(k) }) }
+        }
+        guard let t = subjectWaves.first?.count else { return nil }
+        let waves = subjectWaves.filter { $0.count == t }
+        let n = waves.count
+        guard n > 0 else { return nil }
+
+        var mean = [Float](repeating: 0, count: t)
+        for wave in waves { for i in 0..<t { mean[i] += wave[i] } }
+        for i in 0..<t { mean[i] /= Float(n) }
+
+        var se = [Float](repeating: 0, count: t)
+        if n > 1 {
+            for i in 0..<t {
+                var ss = 0.0
+                for wave in waves { let d = Double(wave[i] - mean[i]); ss += d * d }
+                se[i] = Float((ss / Double(n - 1)).squareRoot() / Double(n).squareRoot())
+            }
+        }
+        return (mean, se, n)
+    }
+
+    /// Mean across the given channel indices at each time point.
+    private func clusterMean(_ samples: [[Float]], channels: [Int]) -> [Float] {
+        let valid = channels.filter { $0 < samples.count }
+        guard let first = valid.first else { return [] }
+        let n = samples[first].count
+        var out = [Float](repeating: 0, count: n)
+        for ch in valid {
+            let trace = samples[ch]
+            guard trace.count == n else { continue }
+            for i in 0..<n { out[i] += trace[i] }
+        }
+        let inv = Float(1) / Float(valid.count)
+        return out.map { $0 * inv }
+    }
+}

@@ -20,7 +20,11 @@ struct DetailView: View {
             modeBar
             Divider()
             modeContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        // Pin the mode bar to the top; without this the whole stack is
+        // vertically centered when the content doesn't fill the pane.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var modeBar: some View {
@@ -46,6 +50,12 @@ struct DetailView: View {
                 "Tensor Mode",
                 systemImage: "cube.transparent",
                 description: Text("Tensor-based analysis is coming soon.")
+            )
+        case .pls:
+            ContentUnavailableView(
+                "PLS Mode",
+                systemImage: "arrow.triangle.branch",
+                description: Text("Partial least squares analysis is coming soon.")
             )
         case .stats:
             StatisticalAnalysisView()
@@ -135,6 +145,11 @@ private struct GroupDetail: View {
     @State private var dualError: String?
     @State private var dualRunning = false
     @State private var dualProgress = RunProgress()
+
+    // Per-subject ERP + design levels for cluster plots (built when results land).
+    @State private var clusterSubjects: [ClusterSubject] = []
+    @State private var clusterBaseline = 0
+    @State private var clusterSamplingRate = 0.0
     @State private var spatialScree: ScreeAnalysis?
     @State private var spatialScreeError: String?
     @State private var spatialScreeRunning = false
@@ -175,6 +190,13 @@ private struct GroupDetail: View {
         .navigationTitle(title)
         .onAppear {
             topomapSample = cursorSample
+            // Switching app modes (PCA → Stats → PCA) tears down this view and
+            // its @State. The completed dual result still lives in the shared
+            // AnalysisStore, so restore it here when returning to the same group.
+            if dualModel == nil, let bundle = analysis.dual, bundle.groupID == groupID {
+                dualModel = bundle.result
+            }
+            if dualModel != nil && clusterSubjects.isEmpty { prepareClusterERP() }
         }
         .onDisappear {
             topomapUpdateTask?.cancel()
@@ -625,7 +647,12 @@ private struct GroupDetail: View {
             } else if let error = dualError {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let model = dualModel {
-                DualPCAView(result: model, sensorLayout: groupSensorLayout)
+                DualPCAView(result: model, sensorLayout: groupSensorLayout,
+                            clusterSubjects: clusterSubjects,
+                            clusterConditionNames: conditionNames,
+                            clusterFactorNames: study.factors.map(\.name),
+                            clusterBaseline: clusterBaseline,
+                            clusterSamplingRate: clusterSamplingRate)
             } else {
                 Text("Runs a temporal PCA, then a spatial PCA on each temporal factor's "
                      + "scores (the ERP Toolkit dual decomposition). The first step uses the "
@@ -674,6 +701,32 @@ private struct GroupDetail: View {
                 }
             }
         }
+    }
+
+    /// Gather per-subject ERPs (channels × samples per condition) plus each
+    /// subject's design levels, used by the cluster-ERP plots when a factor
+    /// topography is clicked. References existing sample arrays (copy-on-write).
+    private func prepareClusterERP() {
+        var out: [ClusterSubject] = []
+        var baseline = 0
+        var sfreq = 0.0
+        for dataset in members {
+            var byCondition: [String: [[Float]]] = [:]
+            for name in conditionNames {
+                if let condition = dataset.conditions.first(where: { $0.name == name }),
+                   let samples = condition.samples, !samples.isEmpty {
+                    byCondition[name] = samples
+                    baseline = condition.baselineSamples
+                    sfreq = dataset.samplingRate
+                }
+            }
+            if !byCondition.isEmpty {
+                out.append(ClusterSubject(name: dataset.name, levels: dataset.levels, byCondition: byCondition))
+            }
+        }
+        clusterSubjects = out
+        clusterBaseline = baseline
+        clusterSamplingRate = sfreq
     }
 
     private func runDualPCA() {
@@ -726,6 +779,7 @@ private struct GroupDetail: View {
                         conditionNames: conditions, subjectNames: subjectNames,
                         sensorLayout: layout, nChannels: nChannels
                     )
+                    prepareClusterERP()
                 case .failure(let error):
                     dualModel = nil
                     dualError = (error as? LocalizedError)?.errorDescription

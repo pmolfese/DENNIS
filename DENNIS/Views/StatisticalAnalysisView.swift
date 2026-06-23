@@ -10,26 +10,12 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
-
-/// A trivial CSV document for `.fileExporter`.
-struct CSVDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
-    var text: String
-    init(text: String) { self.text = text }
-    init(configuration: ReadConfiguration) throws {
-        text = String(decoding: configuration.file.regularFileContents ?? Data(), as: UTF8.self)
-    }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: Data(text.utf8))
-    }
-}
+import AppKit
 
 struct StatisticalAnalysisView: View {
     @Environment(AnalysisStore.self) private var store
 
-    @State private var exportDoc: CSVDocument?
-    @State private var exportName = "export"
-    @State private var showExporter = false
+    @State private var exportError: String?
 
     var body: some View {
         ScrollView {
@@ -48,12 +34,13 @@ struct StatisticalAnalysisView: View {
             }
             .padding()
         }
-        .fileExporter(
-            isPresented: $showExporter,
-            document: exportDoc,
-            contentType: .commaSeparatedText,
-            defaultFilename: exportName
-        ) { _ in }
+        .alert("Export Failed", isPresented: Binding(
+            get: { exportError != nil }, set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportError ?? "")
+        }
     }
 
     @ViewBuilder
@@ -136,10 +123,20 @@ struct StatisticalAnalysisView: View {
         }
     }
 
+    /// Save CSV text via a native save panel. Powerbox grants write access to
+    /// the chosen file, so this works under the app sandbox.
     private func present(_ text: String, name: String) {
-        exportDoc = CSVDocument(text: text)
-        exportName = name
-        showExporter = true
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(name).csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            exportError = error.localizedDescription
+        }
     }
 
     private func safe(_ s: String) -> String {

@@ -14,6 +14,7 @@ import Observation
 enum AppMode: String, CaseIterable, Identifiable {
     case pca = "PCA"
     case tensor = "Tensor"
+    case pls = "PLS"
     case stats = "Statistical Analysis"
     var id: String { rawValue }
 }
@@ -35,6 +36,24 @@ final class AnalysisStore {
     }
 
     var dual: DualBundle?
+
+    /// Spatial-loading threshold for the dual-PCA topographies (rings electrodes
+    /// at/above |loading|, and defines the channel clusters for cluster ERPs).
+    /// Persisted here so it survives switching between app-mode tabs.
+    var spatialThreshold: Double = 0.4
+
+    /// Whether the cluster-ERP plot shades the active temporal window, and the
+    /// |temporal-loading| threshold that defines that window.
+    var highlightTemporalWindow = false
+    var temporalThreshold: Double = 0.4
+
+    /// Whether cluster-ERP traces show a ±1 standard-error band (across subjects).
+    var showStandardError = false
+
+    /// Cluster-ERP "Group by" dimensions, persisted so the choice stays put while
+    /// clicking through factor topographies. A nil visible-cell set means "all".
+    var clusterGroupBy: Set<String> = ["Condition"]
+    var clusterVisibleCells: Set<String>? = nil
 
     /// User-supplied factor labels, keyed by the engine factor name (e.g.
     /// "TF1SF2" → "P300").
