@@ -9,7 +9,7 @@
 
 import Foundation
 
-enum Rotations {
+nonisolated enum Rotations {
 
     // MARK: - Varimax
 
@@ -175,7 +175,7 @@ enum Rotations {
 }
 
 /// Tiny seedable PRNG so rotation restarts are reproducible.
-struct SplitMix64 {
+nonisolated struct SplitMix64 {
     private var state: UInt64
     init(seed: UInt64) { state = seed &+ 0x9E3779B97F4A7C15 }
     mutating func next() -> UInt64 {
@@ -188,5 +188,13 @@ struct SplitMix64 {
     /// Uniform double in [0, 1).
     mutating func nextUnit() -> Double {
         Double(next() >> 11) * (1.0 / 9007199254740992.0)
+    }
+
+    /// Standard-normal double via the Box-Muller transform.
+    mutating func nextGaussian() -> Double {
+        // Avoid log(0) by keeping u1 in (0, 1].
+        let u1 = 1.0 - nextUnit()
+        let u2 = nextUnit()
+        return (-2.0 * Foundation.log(u1)).squareRoot() * Foundation.cos(2.0 * Double.pi * u2)
     }
 }

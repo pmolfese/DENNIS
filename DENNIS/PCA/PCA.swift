@@ -13,11 +13,16 @@
 
 import Foundation
 
-enum PCAMatrixType: String, CaseIterable { case cov = "COV", cor = "COR", scp = "SCP" }
-enum PCARotation: String, CaseIterable { case unrotated, varimax, promax }
-enum PCALoading: String, CaseIterable { case kaiser = "K", none = "N" }
+nonisolated enum PCAMatrixType: String, CaseIterable { case cov = "COV", cor = "COR", scp = "SCP" }
+nonisolated enum PCARotation: String, CaseIterable {
+    case unrotated, varimax, promax, infomax, extendedInfomax
 
-struct PCAResult {
+    /// True for the Infomax family, which bypasses the Kaiser loading path.
+    var isInfomax: Bool { self == .infomax || self == .extendedInfomax }
+}
+nonisolated enum PCALoading: String, CaseIterable { case kaiser = "K", none = "N" }
+
+nonisolated struct PCAResult {
     /// Variables × factors loading (pattern) matrix.
     let pattern: Matrix
     /// Variables × factors structure matrix.
@@ -40,7 +45,7 @@ struct PCAResult {
     let nFactors: Int
 }
 
-enum PCAError: Error, LocalizedError {
+nonisolated enum PCAError: Error, LocalizedError {
     case noGoodVariables
     case tooMuchBadData
     case tooFewObservations(needed: Int, have: Int)
@@ -55,7 +60,7 @@ enum PCAError: Error, LocalizedError {
     }
 }
 
-enum PCACore {
+nonisolated enum PCACore {
 
     /// Run one PCA step on a 2-D matrix (observations × variables).
     static func doPCA(
@@ -66,8 +71,10 @@ enum PCACore {
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
         rotopt: Double = 3,
-        seed: UInt64 = 0
+        seed: UInt64 = 0,
+        report: PCAProgressHandler? = nil
     ) throws -> PCAResult {
+        report?(0.1, "Preparing data")
         let nObs = data.rows
         let nVars = data.cols
 
@@ -96,10 +103,12 @@ enum PCACore {
         case .cor:
             relationData = scaleColumns(centerColumns(work, by: varMean), by: varSd)
         }
+        report?(0.3, "Building covariance matrix")
         let relation = crossProduct(relationData).scaled(1.0 / Double(work.rows - 1))
         let sdRelation = (0..<relation.rows).map { relation[$0, $0].squareRoot() }
 
         // Eigendecomposition (ascending) → take top nFactors descending.
+        report?(0.5, "Eigendecomposition")
         let (eigValsAsc, eigVecsAsc) = try relation.symmetricEigen()
         let order = Array((0..<eigValsAsc.count).reversed())  // descending
         let scree = order.map { eigValsAsc[$0] }
@@ -114,64 +123,89 @@ enum PCACore {
         var facScr = work.multiply(scoreCoefficients)
         let scrSd = columnStd(facScr)
 
-        // Initial loadings = (eigVecs * scrSd) / sdRelation.
-        var loadings = eigVecs
-        for c in 0..<loadings.cols {
-            for r in 0..<loadings.rows {
-                loadings[r, c] = loadings[r, c] * scrSd[c] / sdRelation[r]
-            }
-        }
-
-        // Kaiser normalization.
-        let communalities = (0..<loadings.rows).map { r in
-            (0..<loadings.cols).reduce(0.0) { $0 + loadings[r, $1] * loadings[r, $1] }
-        }
-        if loading == .kaiser {
-            for r in 0..<loadings.rows {
-                let denom = communalities[r].squareRoot()
-                if denom != 0 { for c in 0..<loadings.cols { loadings[r, c] /= denom } }
-            }
-        }
-
-        // Rotation.
         var pattern: Matrix
         var correlation: Matrix
         var structure: Matrix
-        switch rotation {
-        case .unrotated:
-            pattern = loadings
-            correlation = .identity(nFactors)
-            structure = loadings
-        case .varimax:
-            pattern = Rotations.varimax(loadings, seed: seed)
-            correlation = .identity(nFactors)
-            structure = pattern
-        case .promax:
-            let vmx = Rotations.varimax(loadings, seed: seed)
-            let (pat, cor) = try Rotations.promax(vmx, power: rotopt)
-            pattern = pat
-            correlation = cor
-            structure = pat.multiply(cor)
-        }
+        var coefficients: Matrix
 
-        // Undo Kaiser normalization.
-        if loading == .kaiser {
-            for r in 0..<pattern.rows {
-                let scale = communalities[r].squareRoot()
-                for c in 0..<pattern.cols {
-                    pattern[r, c] *= scale
-                    structure[r, c] *= scale
+        if rotation.isInfomax {
+            // Infomax bypasses the Kaiser loading path and produces the pattern,
+            // structure, correlation, scores, and coefficients directly.
+            report?(0.7, rotation == .extendedInfomax ? "Extended Infomax rotation" : "Infomax rotation")
+            let inf = try Infomax.rotate(
+                work: work,
+                initialScores: facScr,
+                initialCoefficients: scoreCoefficients,
+                extended: rotation == .extendedInfomax,
+                rotopt: rotopt, seed: seed
+            )
+            pattern = inf.pattern
+            structure = inf.structure
+            correlation = inf.correlation
+            coefficients = inf.coefficients
+            facScr = inf.scores
+        } else {
+            // Initial loadings = (eigVecs * scrSd) / sdRelation.
+            var loadings = eigVecs
+            for c in 0..<loadings.cols {
+                for r in 0..<loadings.rows {
+                    loadings[r, c] = loadings[r, c] * scrSd[c] / sdRelation[r]
                 }
             }
+
+            // Kaiser normalization.
+            let communalities = (0..<loadings.rows).map { r in
+                (0..<loadings.cols).reduce(0.0) { $0 + loadings[r, $1] * loadings[r, $1] }
+            }
+            if loading == .kaiser {
+                for r in 0..<loadings.rows {
+                    let denom = communalities[r].squareRoot()
+                    if denom != 0 { for c in 0..<loadings.cols { loadings[r, c] /= denom } }
+                }
+            }
+
+            // Rotation.
+            report?(0.7, rotation == .unrotated ? "Finalizing factors" : "Rotating factors")
+            switch rotation {
+            case .unrotated:
+                pattern = loadings
+                correlation = .identity(nFactors)
+                structure = loadings
+            case .varimax:
+                pattern = Rotations.varimax(loadings, seed: seed)
+                correlation = .identity(nFactors)
+                structure = pattern
+            case .promax:
+                let vmx = Rotations.varimax(loadings, seed: seed)
+                let (pat, cor) = try Rotations.promax(vmx, power: rotopt)
+                pattern = pat
+                correlation = cor
+                structure = pat.multiply(cor)
+            case .infomax, .extendedInfomax:
+                fatalError("Infomax handled above")
+            }
+
+            // Undo Kaiser normalization.
+            if loading == .kaiser {
+                for r in 0..<pattern.rows {
+                    let scale = communalities[r].squareRoot()
+                    for c in 0..<pattern.cols {
+                        pattern[r, c] *= scale
+                        structure[r, c] *= scale
+                    }
+                }
+            }
+
+            // Scoring coefficients & final scores.
+            report?(0.9, "Computing scores")
+            var sdScaledPattern = pattern
+            for r in 0..<pattern.rows {
+                for c in 0..<pattern.cols { sdScaledPattern[r, c] *= sdRelation[r] }
+            }
+            coefficients = try sdScaledPattern.pseudoinverse().transposed()
+            facScr = work.multiply(coefficients)
         }
 
-        // Scoring coefficients & final scores.
-        var sdScaledPattern = pattern
-        for r in 0..<pattern.rows {
-            for c in 0..<pattern.cols { sdScaledPattern[r, c] *= sdRelation[r] }
-        }
-        let coefficients = try sdScaledPattern.pseudoinverse().transposed()
-        facScr = work.multiply(coefficients)
         let facScrSd = columnStd(facScr)
         for c in 0..<facScr.cols where facScrSd[c] != 0 {
             for r in 0..<facScr.rows { facScr[r, c] /= facScrSd[c] }
@@ -219,11 +253,18 @@ enum PCACore {
         var fullScree = [Double](repeating: 0, count: nVars)
         for i in 0..<min(nVars, scree.count) { fullScree[i] = scree[i] }
 
+        // Scatter variable-indexed results (good vars only) back to the full
+        // variable space so rows align with original channel/time indices, with
+        // zeros for dropped (flat) variables — mirrors Python's `full_pat`.
+        let fullPattern = scatterRows(pattern, goodVars: goodVars, nVars: nVars)
+        let fullStructure = scatterRows(structure, goodVars: goodVars, nVars: nVars)
+        let fullCoefficients = scatterRows(coefficientsSorted, goodVars: goodVars, nVars: nVars)
+
         return PCAResult(
-            pattern: pattern,
-            structure: structure,
+            pattern: fullPattern,
+            structure: fullStructure,
             scores: scoresSorted,
-            coefficients: coefficientsSorted,
+            coefficients: fullCoefficients,
             correlation: correlationSorted,
             scree: fullScree,
             variance: facVarSorted,
@@ -232,6 +273,17 @@ enum PCACore {
             mode: mode,
             nFactors: nFactors
         )
+    }
+
+    /// Scatter the rows of a `goodVars × cols` matrix into a `nVars × cols`
+    /// matrix, placing each row at its original variable index and zero elsewhere.
+    private static func scatterRows(_ m: Matrix, goodVars: [Int], nVars: Int) -> Matrix {
+        guard m.rows != nVars else { return m }
+        var out = Matrix(rows: nVars, cols: m.cols)
+        for (newR, origR) in goodVars.enumerated() {
+            for c in 0..<m.cols { out[origR, c] = m[newR, c] }
+        }
+        return out
     }
 
     // MARK: - Variance helper

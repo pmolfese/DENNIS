@@ -13,7 +13,47 @@ struct DetailView: View {
     @Environment(Study.self) private var study
     let selection: SidebarSelection?
 
+    @State private var mode: AppMode = .pca
+
     var body: some View {
+        VStack(spacing: 0) {
+            modeBar
+            Divider()
+            modeContent
+        }
+    }
+
+    private var modeBar: some View {
+        HStack {
+            Picker("Mode", selection: $mode) {
+                ForEach(AppMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private var modeContent: some View {
+        switch mode {
+        case .pca:
+            selectionContent
+        case .tensor:
+            ContentUnavailableView(
+                "Tensor Mode",
+                systemImage: "cube.transparent",
+                description: Text("Tensor-based analysis is coming soon.")
+            )
+        case .stats:
+            StatisticalAnalysisView()
+        }
+    }
+
+    @ViewBuilder
+    private var selectionContent: some View {
         switch selection {
         case .group(let id):
             GroupDetail(groupID: id).id(id)
@@ -56,6 +96,7 @@ struct DetailView: View {
 
 private struct GroupDetail: View {
     @Environment(Study.self) private var study
+    @Environment(AnalysisStore.self) private var analysis
     let groupID: String
 
     enum OverlayMode: String, CaseIterable, Identifiable {
@@ -72,6 +113,39 @@ private struct GroupDetail: View {
     @State private var topomapSample = 0
     @State private var topomapUpdateTask: Task<Void, Never>?
 
+    // Scree / parallel analysis.
+    @State private var screeMode: PCAMode = .temporal
+    @State private var screeAnalysis: ScreeAnalysis?
+    @State private var screeError: String?
+    @State private var screeRunning = false
+
+    // Temporal PCA.
+    @State private var pcaFactors = 3
+    @State private var pcaRotation: PCARotation = .promax
+    @State private var pcaModel: TemporalPCAResult?
+    @State private var pcaError: String?
+    @State private var pcaRunning = false
+    @State private var pcaProgress = RunProgress()
+    @State private var screeProgress = RunProgress()
+
+    // Dual (two-step) PCA: temporal → spatial.
+    @State private var dualSpatialFactors = 3
+    @State private var dualSecondRotation: PCARotation = .infomax
+    @State private var dualModel: TwoStepPCAResult?
+    @State private var dualError: String?
+    @State private var dualRunning = false
+    @State private var dualProgress = RunProgress()
+    @State private var spatialScree: ScreeAnalysis?
+    @State private var spatialScreeError: String?
+    @State private var spatialScreeRunning = false
+    @State private var spatialScreeProgress = RunProgress()
+
+    // PCA window / preprocessing (milliseconds; auto-populated from the data).
+    @State private var trimPre: Double = -100
+    @State private var trimPost: Double = 900
+    @State private var downsampleFactor: Int = 1
+    @State private var windowInitialized = false
+
     private var members: [Dataset] { study.datasets(inGroupID: groupID) }
     private var conditionNames: [String] { study.sharedConditionNames(inGroupID: groupID) }
     private var children: [Study.ChildGroup] { study.childGroups(ofGroupID: groupID) }
@@ -87,6 +161,14 @@ private struct GroupDetail: View {
                 infoGrid
                 Divider()
                 grandAverageSection
+                Divider()
+                preprocessingSection
+                Divider()
+                screeSection
+                Divider()
+                temporalPCASection
+                Divider()
+                dualPCASection
             }
             .padding()
         }
@@ -105,7 +187,17 @@ private struct GroupDetail: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.largeTitle.bold())
+            if groupID.isEmpty {
+                // The root group is the study itself — let the title be renamed.
+                TextField("Study name", text: Binding(
+                    get: { study.name },
+                    set: { study.name = $0 }
+                ))
+                .textFieldStyle(.plain)
+                .font(.largeTitle.bold())
+            } else {
+                Text(title).font(.largeTitle.bold())
+            }
             Text(groupID.isEmpty ? "All subjects" : groupID.replacingOccurrences(of: "/", with: " › "))
                 .foregroundStyle(.secondary)
         }
@@ -170,6 +262,455 @@ private struct GroupDetail: View {
                 }
 
                 content
+            }
+        }
+    }
+
+    // MARK: - PCA window / preprocessing
+
+    /// Sampling rate, baseline length, and time-point count from the first
+    /// loaded, shared-condition dataset in this group.
+    private var dataTimeInfo: (rate: Double, baseline: Int, nTimes: Int)? {
+        for dataset in members {
+            if let condition = dataset.conditions.first(where: { conditionNames.contains($0.name) }),
+               let samples = condition.samples, let first = samples.first {
+                return (dataset.samplingRate, condition.baselineSamples, first.count)
+            }
+        }
+        return nil
+    }
+
+    /// A sensor layout for this group, taken from the first member that has one.
+    private var groupSensorLayout: SensorLayout? {
+        members.first(where: { $0.sensorLayout != nil })?.sensorLayout
+    }
+
+    /// The data's natural full window in ms, used to seed the trim boxes.
+    private var naturalWindow: (preMS: Double, postMS: Double)? {
+        guard let info = dataTimeInfo, info.rate > 0 else { return nil }
+        let pre = Double(0 - info.baseline) / info.rate * 1000
+        let post = Double(info.nTimes - 1 - info.baseline) / info.rate * 1000
+        return (pre, post)
+    }
+
+    /// The time axis (retained sample indices + ms) for the current trim and
+    /// downsample settings, or nil if the data timing is unknown.
+    private func currentTimeAxis() -> EPTensor.TimeAxis? {
+        guard let info = dataTimeInfo else { return nil }
+        return EPTensor.selectTimeSamples(
+            samplingRate: info.rate, baselineSamples: info.baseline, nTimes: info.nTimes,
+            preMS: trimPre, postMS: trimPost, downsample: downsampleFactor
+        )
+    }
+
+    private func initializeWindowIfNeeded() {
+        guard !windowInitialized, let window = naturalWindow else { return }
+        trimPre = (window.preMS).rounded()
+        trimPost = (window.postMS).rounded()
+        windowInitialized = true
+    }
+
+    @ViewBuilder
+    private var preprocessingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("PCA Window").font(.headline)
+
+            if let info = dataTimeInfo, info.rate > 0 {
+                let axis = currentTimeAxis()
+                let effectiveRate = info.rate / Double(max(1, downsampleFactor))
+                HStack(alignment: .bottom, spacing: 16) {
+                    msField("Pre (ms)", value: $trimPre)
+                    msField("Post (ms)", value: $trimPost)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Downsample").font(.caption).foregroundStyle(.secondary)
+                        Picker("Downsample", selection: $downsampleFactor) {
+                            Text("None").tag(1)
+                            Text("½ (2×)").tag(2)
+                            Text("¼ (4×)").tag(4)
+                            Text("⅛ (8×)").tag(8)
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    Button("Reset") {
+                        if let w = naturalWindow {
+                            trimPre = w.preMS.rounded(); trimPost = w.postMS.rounded()
+                        }
+                        downsampleFactor = 1
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Text("\(axis?.indices.count ?? info.nTimes) time points · "
+                     + String(format: "%.0f Hz effective", effectiveRate))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Load data with a known sampling rate to set the PCA window.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .onAppear { initializeWindowIfNeeded() }
+        .onChange(of: loadedCount) { _, _ in initializeWindowIfNeeded() }
+    }
+
+    private func msField(_ label: String, value: Binding<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            TextField(label, value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 80)
+        }
+    }
+
+    // MARK: - Scree / parallel analysis
+
+    @ViewBuilder
+    private var screeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Scree / Parallel Analysis").font(.headline)
+                Spacer()
+                Picker("PCA mode", selection: $screeMode) {
+                    Text("Temporal").tag(PCAMode.temporal)
+                    Text("Spatial").tag(PCAMode.spatial)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .onChange(of: screeMode) { _, _ in screeAnalysis = nil; screeError = nil }
+
+                Button {
+                    runScree()
+                } label: {
+                    Label("Run Scree", systemImage: "chart.xyaxis.line")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(conditionNames.isEmpty || loadedCount == 0 || screeRunning)
+            }
+
+            if screeRunning {
+                progressBar(screeProgress)
+            }
+
+            if conditionNames.isEmpty {
+                Text("No shared conditions across these subjects yet (still loading?).")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let error = screeError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            } else if let analysis = screeAnalysis {
+                ScreePlotView(analysis: analysis)
+            } else {
+                Text("Runs an unrotated PCA on the \(screeMode == .temporal ? "time" : "channel") "
+                     + "dimension and compares its eigenvalues against random data of the same shape.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func runScree() {
+        let mode = screeMode
+        // Gather a Sendable snapshot on the main actor; the heavy tensor fill and
+        // PCA run in the background.
+        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
+            screeAnalysis = nil
+            screeError = "No dimension-consistent loaded data to analyze yet."
+            return
+        }
+        let input = snapshot.input
+        let timeIndices = currentTimeAxis()?.indices
+        let report = screeProgress.handler()
+        screeProgress.reset()
+        screeRunning = true
+        screeError = nil
+        Task.detached(priority: .userInitiated) {
+            let result: Result<ScreeAnalysis, Error>
+            do {
+                report(0.02, "Assembling data tensor")
+                let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
+                result = .success(try Scree.analyze(tensor, mode: mode, report: report))
+            } catch {
+                result = .failure(error)
+            }
+            await MainActor.run {
+                screeRunning = false
+                switch result {
+                case .success(let analysis): screeAnalysis = analysis
+                case .failure(let error):
+                    screeAnalysis = nil
+                    screeError = (error as? LocalizedError)?.errorDescription
+                        ?? "Scree analysis failed: \(error)"
+                }
+            }
+        }
+    }
+
+    private func progressBar(_ progress: RunProgress) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ProgressView(value: progress.fraction)
+            Text(progress.stage.isEmpty ? "Working…" : progress.stage)
+                .font(.caption).foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+    }
+
+    // MARK: - Temporal PCA
+
+    @ViewBuilder
+    private var temporalPCASection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Temporal PCA").font(.headline)
+                Spacer()
+                Stepper("Factors: \(pcaFactors)", value: $pcaFactors, in: 1...20)
+                    .fixedSize()
+                Picker("Rotation", selection: $pcaRotation) {
+                    Text("Promax").tag(PCARotation.promax)
+                    Text("Varimax").tag(PCARotation.varimax)
+                    Text("Infomax").tag(PCARotation.infomax)
+                    Text("Extended Infomax").tag(PCARotation.extendedInfomax)
+                    Text("Unrotated").tag(PCARotation.unrotated)
+                }
+                .fixedSize()
+                Button {
+                    runTemporalPCA()
+                } label: {
+                    Label("Run PCA", systemImage: "waveform.path.ecg.rectangle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(conditionNames.isEmpty || loadedCount == 0 || pcaRunning)
+            }
+
+            if pcaRunning {
+                progressBar(pcaProgress)
+            }
+
+            if conditionNames.isEmpty {
+                Text("No shared conditions across these subjects yet (still loading?).")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let error = pcaError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            } else if let model = pcaModel {
+                TemporalPCAView(model: model)
+            } else {
+                Text("Runs a temporal PCA (time points as variables) and plots each "
+                     + "factor's loading as a waveform. Use the scree plot above to pick a "
+                     + "factor count.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func runTemporalPCA() {
+        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
+            pcaModel = nil
+            pcaError = "No dimension-consistent loaded data to analyze yet."
+            return
+        }
+        let input = snapshot.input
+        let rotation = pcaRotation
+        let requestedFactors = pcaFactors
+        let axis = currentTimeAxis()
+        let timeIndices = axis?.indices
+        let timesMS = axis?.timesMS ?? []
+        let report = pcaProgress.handler()
+
+        pcaProgress.reset()
+        pcaRunning = true
+        pcaError = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome: Result<TemporalPCAResult, Error>
+            do {
+                report(0.02, "Assembling data tensor")
+                let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
+                let nFactors = min(requestedFactors, tensor.variableCount(for: .temporal))
+                report(0.05, "Reshaping for temporal PCA")
+                let matrix = tensor.reshape(forMode: .temporal)
+                let result = try PCACore.doPCA(
+                    matrix, mode: .temporal, rotation: rotation, nFactors: nFactors,
+                    report: report
+                )
+                outcome = .success(TemporalPCAResult(result: result, timesMS: timesMS))
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                pcaRunning = false
+                switch outcome {
+                case .success(let model): pcaModel = model
+                case .failure(let error):
+                    pcaModel = nil
+                    pcaError = (error as? LocalizedError)?.errorDescription
+                        ?? "Temporal PCA failed: \(error)"
+                }
+            }
+        }
+    }
+
+    // MARK: - Dual (two-step) PCA
+
+    @ViewBuilder
+    private var dualPCASection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Dual PCA (Temporal → Spatial)").font(.headline)
+                Spacer()
+                Stepper("Spatial factors: \(dualSpatialFactors)", value: $dualSpatialFactors, in: 1...20)
+                    .fixedSize()
+                Picker("2nd rotation", selection: $dualSecondRotation) {
+                    Text("Infomax").tag(PCARotation.infomax)
+                    Text("Extended Infomax").tag(PCARotation.extendedInfomax)
+                    Text("Promax").tag(PCARotation.promax)
+                    Text("Varimax").tag(PCARotation.varimax)
+                }
+                .fixedSize()
+                Button {
+                    runSpatialScree()
+                } label: {
+                    Label("Spatial Scree", systemImage: "chart.xyaxis.line")
+                }
+                .buttonStyle(.bordered)
+                .disabled(conditionNames.isEmpty || loadedCount == 0 || spatialScreeRunning)
+
+                Button {
+                    runDualPCA()
+                } label: {
+                    Label("Run Dual PCA", systemImage: "square.stack.3d.up")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(conditionNames.isEmpty || loadedCount == 0 || dualRunning)
+            }
+
+            Text("Spatial factors are chosen per temporal factor. Run the spatial scree "
+                 + "to estimate how many to retain (uses the temporal factor count and "
+                 + "rotation above).")
+                .font(.caption).foregroundStyle(.secondary)
+
+            if spatialScreeRunning {
+                progressBar(spatialScreeProgress)
+            }
+            if let error = spatialScreeError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            } else if let scree = spatialScree {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Spatial scree (second step)").font(.subheadline.weight(.semibold))
+                    ScreePlotView(analysis: scree)
+                }
+            }
+
+            if dualRunning {
+                progressBar(dualProgress)
+            }
+
+            if conditionNames.isEmpty {
+                Text("No shared conditions across these subjects yet (still loading?).")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let error = dualError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            } else if let model = dualModel {
+                DualPCAView(result: model, sensorLayout: groupSensorLayout)
+            } else {
+                Text("Runs a temporal PCA, then a spatial PCA on each temporal factor's "
+                     + "scores (the ERP Toolkit dual decomposition). The first step uses the "
+                     + "rotation chosen above; the second step uses the rotation here.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func runSpatialScree() {
+        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
+            spatialScree = nil
+            spatialScreeError = "No dimension-consistent loaded data to analyze yet."
+            return
+        }
+        let input = snapshot.input
+        let firstRotation = pcaRotation
+        let firstFactors = pcaFactors
+        let timeIndices = currentTimeAxis()?.indices
+        let report = spatialScreeProgress.handler()
+
+        spatialScreeProgress.reset()
+        spatialScreeRunning = true
+        spatialScreeError = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome: Result<ScreeAnalysis, Error>
+            do {
+                report(0.02, "Assembling data tensor")
+                let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
+                let analysis = try Scree.analyzeTwoStep(
+                    tensor, firstMode: .temporal, secondMode: .spatial,
+                    firstFactors: firstFactors, firstRotation: firstRotation, report: report
+                )
+                outcome = .success(analysis)
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                spatialScreeRunning = false
+                switch outcome {
+                case .success(let analysis): spatialScree = analysis
+                case .failure(let error):
+                    spatialScree = nil
+                    spatialScreeError = (error as? LocalizedError)?.errorDescription
+                        ?? "Spatial scree failed: \(error)"
+                }
+            }
+        }
+    }
+
+    private func runDualPCA() {
+        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
+            dualModel = nil
+            dualError = "No dimension-consistent loaded data to analyze yet."
+            return
+        }
+        let input = snapshot.input
+        let subjectNames = snapshot.subjects.map(\.name)
+        let conditions = conditionNames
+        let layout = groupSensorLayout
+        let nChannels = input.nChannels
+        let label = title
+        let id = groupID
+        let firstRotation = pcaRotation
+        let secondRotation = dualSecondRotation
+        let firstFactors = pcaFactors
+        let spatialFactors = dualSpatialFactors
+        let axis = currentTimeAxis()
+        let timeIndices = axis?.indices
+        let timesMS = axis?.timesMS ?? []
+        let report = dualProgress.handler()
+
+        dualProgress.reset()
+        dualRunning = true
+        dualError = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome: Result<TwoStepPCAResult, Error>
+            do {
+                report(0.02, "Assembling data tensor")
+                let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
+                let result = try TwoStepPCA.run(
+                    tensor: tensor, firstMode: .temporal, secondMode: .spatial,
+                    firstFactors: firstFactors, secondFactors: spatialFactors,
+                    firstRotation: firstRotation, secondRotation: secondRotation,
+                    firstTimesMS: timesMS, report: report
+                )
+                outcome = .success(result)
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                dualRunning = false
+                switch outcome {
+                case .success(let model):
+                    dualModel = model
+                    analysis.dual = AnalysisStore.DualBundle(
+                        result: model, groupID: id, groupLabel: label,
+                        conditionNames: conditions, subjectNames: subjectNames,
+                        sensorLayout: layout, nChannels: nChannels
+                    )
+                case .failure(let error):
+                    dualModel = nil
+                    dualError = (error as? LocalizedError)?.errorDescription
+                        ?? "Dual PCA failed: \(error)"
+                }
             }
         }
     }

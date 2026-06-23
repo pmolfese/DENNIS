@@ -10,7 +10,7 @@
 
 import Accelerate
 
-struct Matrix {
+nonisolated struct Matrix {
     let rows: Int
     let cols: Int
     /// Column-major: element(r, c) == grid[c * rows + r].

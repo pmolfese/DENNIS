@@ -82,4 +82,5 @@ extension UTType {
     ContentView()
         .environment(Study())
         .environment(StudyImporter())
+        .environment(AnalysisStore())
 }
