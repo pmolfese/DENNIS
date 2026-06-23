@@ -40,9 +40,20 @@ final class AnalysisStore {
     /// "TF1SF2" → "P300").
     var factorLabels: [String: String] = [:]
 
-    /// Whether exported factor scores are scaled toward microvolts by peak
-    /// loading (approximate) rather than left standardized.
+    /// Whether exported factor scores are reconstructed into microvolts (via
+    /// var_sd-scaled loadings) rather than left standardized.
     var scaleToMicrovolts = false
+
+    /// How a factor's loading is reduced to a single amplitude for µV scaling.
+    enum MicrovoltMeasure: String, CaseIterable, Identifiable {
+        case peak = "Peak"
+        case meanWindow = "Mean (window)"
+        var id: String { rawValue }
+    }
+    var microvoltMeasure: MicrovoltMeasure = .peak
+    /// Temporal window (ms) for the mean measure; nil bounds use the full epoch.
+    var windowStartMS: Double = 0
+    var windowEndMS: Double = 800
 
     func label(for engineName: String) -> String {
         let custom = factorLabels[engineName]?.trimmingCharacters(in: .whitespaces)

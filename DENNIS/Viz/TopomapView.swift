@@ -21,6 +21,9 @@ struct TopomapView: View {
     var interpolationStep: CGFloat = 4
     var usesVerticalColorBar: Bool = false
     var canvasMinHeight: CGFloat = 260
+    /// When set, electrodes whose |value| ≥ this are drawn as enlarged ringed
+    /// markers to flag the supra-threshold topography.
+    var highlightThreshold: Double? = nil
 
     private let interpolationPower: Double = 3
 
@@ -118,10 +121,17 @@ struct TopomapView: View {
 
         drawNoseAndEars(in: &context, center: center, radius: radius)
 
-        // Electrode markers.
-        for (point, _) in points {
-            let dot = CGRect(x: point.x - 1.6, y: point.y - 1.6, width: 3.2, height: 3.2)
-            context.fill(Path(ellipseIn: dot), with: .color(.black.opacity(0.55)))
+        // Electrode markers; supra-threshold electrodes get an enlarged ring.
+        for (point, value) in points {
+            let supra = highlightThreshold.map { abs(value) >= $0 } ?? false
+            if supra {
+                let ring = CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
+                context.fill(Path(ellipseIn: ring), with: .color(.black.opacity(0.85)))
+                context.stroke(Path(ellipseIn: ring), with: .color(.white), lineWidth: 1.2)
+            } else {
+                let dot = CGRect(x: point.x - 1.6, y: point.y - 1.6, width: 3.2, height: 3.2)
+                context.fill(Path(ellipseIn: dot), with: .color(.black.opacity(0.55)))
+            }
         }
     }
 

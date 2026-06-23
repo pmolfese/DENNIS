@@ -33,6 +33,9 @@ nonisolated struct PCAResult {
     let coefficients: Matrix
     /// Factors × factors factor correlation matrix.
     let correlation: Matrix
+    /// Per-variable standard deviation (full length, zero for dropped vars).
+    /// Scaling the pattern by this gives microvolt-valued loadings.
+    let variableSD: [Double]
     /// Eigenvalues (descending), length = number of variables.
     let scree: [Double]
     /// Proportion of total variance per factor (communality share).
@@ -260,12 +263,17 @@ nonisolated enum PCACore {
         let fullStructure = scatterRows(structure, goodVars: goodVars, nVars: nVars)
         let fullCoefficients = scatterRows(coefficientsSorted, goodVars: goodVars, nVars: nVars)
 
+        // Full-length per-variable SD (zeros for dropped vars) for µV scaling.
+        var fullVarSD = [Double](repeating: 0, count: nVars)
+        for (i, origVar) in goodVars.enumerated() { fullVarSD[origVar] = varSd[i] }
+
         return PCAResult(
             pattern: fullPattern,
             structure: fullStructure,
             scores: scoresSorted,
             coefficients: fullCoefficients,
             correlation: correlationSorted,
+            variableSD: fullVarSD,
             scree: fullScree,
             variance: facVarSorted,
             uniqueVariance: facVarQSorted,

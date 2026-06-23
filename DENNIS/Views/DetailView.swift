@@ -396,7 +396,10 @@ private struct GroupDetail: View {
             } else if let error = screeError {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let analysis = screeAnalysis {
-                ScreePlotView(analysis: analysis)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack { Spacer(); savePNGButton("\(screeMode.rawValue)_scree") { ScreePlotView(analysis: analysis) } }
+                    ScreePlotView(analysis: analysis)
+                }
             } else {
                 Text("Runs an unrotated PCA on the \(screeMode == .temporal ? "time" : "channel") "
                      + "dimension and compares its eigenvalues against random data of the same shape.")
@@ -440,6 +443,16 @@ private struct GroupDetail: View {
                 }
             }
         }
+    }
+
+    private func savePNGButton<V: View>(_ name: String, @ViewBuilder _ view: @escaping () -> V) -> some View {
+        Button {
+            ImageExport.savePNG(view(), suggestedName: name)
+        } label: {
+            Label("Save PNG", systemImage: "square.and.arrow.down")
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
     }
 
     private func progressBar(_ progress: RunProgress) -> some View {
@@ -488,7 +501,10 @@ private struct GroupDetail: View {
             } else if let error = pcaError {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let model = pcaModel {
-                TemporalPCAView(model: model)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack { Spacer(); savePNGButton("temporal_loadings") { TemporalPCAView(model: model) } }
+                    TemporalPCAView(model: model)
+                }
             } else {
                 Text("Runs a temporal PCA (time points as variables) and plots each "
                      + "factor's loading as a waveform. Use the scree plot above to pick a "
@@ -590,7 +606,11 @@ private struct GroupDetail: View {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let scree = spatialScree {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Spatial scree (second step)").font(.subheadline.weight(.semibold))
+                    HStack {
+                        Text("Spatial scree (second step)").font(.subheadline.weight(.semibold))
+                        Spacer()
+                        savePNGButton("spatial_scree") { ScreePlotView(analysis: scree) }
+                    }
                     ScreePlotView(analysis: scree)
                 }
             }

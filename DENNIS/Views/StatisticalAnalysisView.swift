@@ -77,16 +77,43 @@ struct StatisticalAnalysisView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Export").font(.headline)
 
-            Toggle("Scale factor scores toward microvolts (peak loading, approximate)",
+            Toggle("Reconstruct factor scores in microvolts (var_sd-scaled loadings)",
                    isOn: Binding(get: { store.scaleToMicrovolts },
                                  set: { store.scaleToMicrovolts = $0 }))
                 .toggleStyle(.checkbox)
                 .font(.callout)
 
+            if store.scaleToMicrovolts {
+                HStack(spacing: 12) {
+                    Picker("Measure", selection: Binding(
+                        get: { store.microvoltMeasure },
+                        set: { store.microvoltMeasure = $0 })) {
+                        ForEach(AnalysisStore.MicrovoltMeasure.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .fixedSize()
+                    if store.microvoltMeasure == .meanWindow {
+                        Text("Window (ms):").font(.caption).foregroundStyle(.secondary)
+                        TextField("start", value: Binding(get: { store.windowStartMS },
+                                                          set: { store.windowStartMS = $0 }),
+                                  format: .number)
+                            .frame(width: 60).textFieldStyle(.roundedBorder)
+                        Text("–").foregroundStyle(.secondary)
+                        TextField("end", value: Binding(get: { store.windowEndMS },
+                                                        set: { store.windowEndMS = $0 }),
+                                  format: .number)
+                            .frame(width: 60).textFieldStyle(.roundedBorder)
+                    }
+                }
+                .padding(.leading, 20)
+            }
+
             HStack(spacing: 12) {
                 Button {
-                    present(CSVBuilders.factorScores(bundle, microvolts: store.scaleToMicrovolts,
-                                                     label: store.label),
+                    present(CSVBuilders.factorScores(
+                        bundle, microvolts: store.scaleToMicrovolts,
+                        measure: store.microvoltMeasure,
+                        windowStartMS: store.windowStartMS, windowEndMS: store.windowEndMS,
+                        label: store.label),
                             name: "\(safe(bundle.groupLabel))_factor_scores")
                 } label: { Label("Factor Scores", systemImage: "tablecells") }
 
