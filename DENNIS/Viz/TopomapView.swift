@@ -17,33 +17,49 @@ struct TopomapView: View {
     /// When non-nil, fixes the symmetric color scale to ±this value (µV).
     /// When nil, the scale auto-fits to the data at this time point.
     let fixedScale: Double?
+    var showsHeader: Bool = true
+    var interpolationStep: CGFloat = 4
+    var usesVerticalColorBar: Bool = false
+    var canvasMinHeight: CGFloat = 260
 
     private let interpolationPower: Double = 3
 
     var body: some View {
         VStack(spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(layout.name.isEmpty ? "Topography" : layout.name)
-                    .font(.headline)
-                Spacer()
-                Text(String(format: "t = %.3f s", timeSeconds))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            GeometryReader { proxy in
-                let side = min(proxy.size.width, proxy.size.height)
-                Canvas { context, size in
-                    draw(in: &context, size: size)
+            if showsHeader {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(layout.name.isEmpty ? "Topography" : layout.name)
+                        .font(.headline)
+                    Spacer()
+                    Text(String(format: "t = %.3f s", timeSeconds))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                .frame(width: side, height: side)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(minHeight: 260)
 
-            colorBar
+            if usesVerticalColorBar {
+                HStack(alignment: .center, spacing: 10) {
+                    topomapCanvas
+                    verticalColorBar
+                }
+            } else {
+                topomapCanvas
+                horizontalColorBar
+            }
         }
         .padding(16)
+    }
+
+    private var topomapCanvas: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            Canvas { context, size in
+                draw(in: &context, size: size)
+            }
+            .frame(width: side, height: side)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minHeight: canvasMinHeight)
     }
 
     private var scale: Double {
@@ -118,7 +134,7 @@ struct TopomapView: View {
     ) {
         guard !points.isEmpty else { return }
 
-        let step: CGFloat = 4
+        let step = max(2, interpolationStep)
         let radiusSquared = radius * radius
 
         var x = center.x - radius
@@ -190,7 +206,7 @@ struct TopomapView: View {
 
     // MARK: - Color
 
-    private var colorBar: some View {
+    private var horizontalColorBar: some View {
         let currentScale = scale
         return HStack(spacing: 8) {
             Text(String(format: "%.1f", -currentScale))
@@ -209,6 +225,32 @@ struct TopomapView: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var verticalColorBar: some View {
+        let currentScale = scale
+        return VStack(spacing: 6) {
+            Text(String(format: "+%.1f", currentScale))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            LinearGradient(
+                colors: stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(width: 12, height: 190)
+            .clipShape(Capsule())
+
+            Text(String(format: "%.1f", -currentScale))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Text("uV")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 42)
     }
 
     /// Diverging blue–white–red map. `normalized` is expected in roughly -1...1.

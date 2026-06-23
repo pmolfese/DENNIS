@@ -2,9 +2,9 @@
 //  OverlayWaveformView.swift
 //  DENNIS
 //
-//  Overlays several single-trace waveforms (e.g. the channel centroid of each
-//  sub-group or each condition) on a shared time/amplitude axis, each in its own
-//  color with a legend. Used for grand-average comparisons.
+//  Overlays several butterfly plots on a shared time/amplitude axis, each in
+//  its own color with a bold centroid guide and legend. Used for grand-average
+//  comparisons.
 //
 
 import SwiftUI
@@ -13,25 +13,37 @@ struct OverlayTrace: Identifiable {
     let id: String
     let label: String
     let color: Color
-    /// One waveform (e.g. a centroid), `sampleCount` long.
-    let samples: [Float]
+    /// `channels × samples` for this comparison.
+    let samples: [[Float]]
+    /// Mean across channels, used for a bold guide line and cursor readout.
+    let centroid: [Float]
     let contributing: Int
+    let sensorLayout: SensorLayout?
+
+    var sampleCount: Int { samples.first?.count ?? centroid.count }
 }
 
 struct OverlayWaveformView: View {
     let traces: [OverlayTrace]
     let samplingRate: Double
     let baselineSamples: Int
+    let showsCentroid: Bool
     @Binding var cursorSample: Int
 
     /// Distinct, color-blind-friendlyish palette for overlays.
     static let palette: [Color] = [.blue, .red, .green, .orange, .purple, .teal, .pink, .brown]
 
-    private var sampleCount: Int { traces.map(\.samples.count).max() ?? 0 }
+    private var sampleCount: Int { traces.map(\.sampleCount).max() ?? 0 }
 
     private var amplitudeBound: Double {
         let maxAbs = traces.reduce(0.0) { partial, trace in
-            max(partial, trace.samples.reduce(0.0) { max($0, Double(abs($1))) })
+            let sampleMax = trace.samples.reduce(0.0) { channelPartial, channel in
+                max(channelPartial, channel.reduce(0.0) { max($0, Double(abs($1))) })
+            }
+            let centroidMax = showsCentroid
+                ? trace.centroid.reduce(0.0) { max($0, Double(abs($1))) }
+                : 0.0
+            return max(partial, max(sampleMax, centroidMax))
         }
         return maxAbs > 0 ? maxAbs : 1
     }
@@ -96,13 +108,21 @@ struct OverlayWaveformView: View {
                            style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
 
-        for trace in traces where trace.samples.count > 1 {
-            var path = Path()
-            path.move(to: CGPoint(x: 0, y: midY - CGFloat(trace.samples[0]) * yScale))
-            for i in 1..<trace.samples.count {
-                path.addLine(to: CGPoint(x: CGFloat(i) * xScale, y: midY - CGFloat(trace.samples[i]) * yScale))
+        for trace in traces {
+            for channel in trace.samples where channel.count == sampleCount {
+                context.stroke(
+                    path(for: channel, midY: midY, xScale: xScale, yScale: yScale),
+                    with: .color(trace.color.opacity(0.22)),
+                    lineWidth: 0.8
+                )
             }
-            context.stroke(path, with: .color(trace.color), lineWidth: 1.8)
+            if showsCentroid, trace.centroid.count == sampleCount {
+                context.stroke(
+                    path(for: trace.centroid, midY: midY, xScale: xScale, yScale: yScale),
+                    with: .color(trace.color.opacity(0.95)),
+                    lineWidth: 2.2
+                )
+            }
         }
 
         let cursorX = CGFloat(min(max(cursorSample, 0), sampleCount - 1)) * xScale
@@ -135,12 +155,13 @@ struct OverlayWaveformView: View {
         HStack(spacing: 10) {
             Text(timeLabel(forSample: cursorSample))
                 .font(.caption.monospacedDigit().weight(.semibold))
-            // Per-trace value at the cursor.
-            ForEach(traces) { trace in
-                if cursorSample < trace.samples.count {
-                    Text(String(format: "%.1f", trace.samples[cursorSample]))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(trace.color)
+            if showsCentroid {
+                ForEach(traces) { trace in
+                    if cursorSample < trace.centroid.count {
+                        Text(String(format: "%.1f", trace.centroid[cursorSample]))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(trace.color)
+                    }
                 }
             }
         }
@@ -151,6 +172,15 @@ struct OverlayWaveformView: View {
     }
 
     // MARK: - Time helpers
+
+    private func path(for channel: [Float], midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: midY - CGFloat(channel[0]) * yScale))
+        for i in 1..<channel.count {
+            path.addLine(to: CGPoint(x: CGFloat(i) * xScale, y: midY - CGFloat(channel[i]) * yScale))
+        }
+        return path
+    }
 
     private func sample(forX x: CGFloat, width: CGFloat) -> Int {
         guard sampleCount > 1, width > 0 else { return 0 }

@@ -66,7 +66,11 @@ private struct GroupDetail: View {
     @State private var selectedCondition: String?
     @State private var showPlot = false
     @State private var overlayMode: OverlayMode = .single
+    @State private var showOverlayCentroid = false
+    @State private var compareTopomaps = false
     @State private var cursorSample = 0
+    @State private var topomapSample = 0
+    @State private var topomapUpdateTask: Task<Void, Never>?
 
     private var members: [Dataset] { study.datasets(inGroupID: groupID) }
     private var conditionNames: [String] { study.sharedConditionNames(inGroupID: groupID) }
@@ -87,6 +91,16 @@ private struct GroupDetail: View {
             .padding()
         }
         .navigationTitle(title)
+        .onAppear {
+            topomapSample = cursorSample
+        }
+        .onDisappear {
+            topomapUpdateTask?.cancel()
+            topomapUpdateTask = nil
+        }
+        .onChange(of: cursorSample) { _, newValue in
+            scheduleTopomapUpdate(sample: newValue)
+        }
     }
 
     private var header: some View {
@@ -176,11 +190,11 @@ private struct GroupDetail: View {
                             + "or use “Conditions”.")
             } else if let name = selectedCondition {
                 overlayPlot(traces: subgroupTraces(condition: name),
-                            caption: "\(name) · centroid per sub-folder")
+                            caption: "\(name) · butterfly plot per sub-folder")
             }
         case .conditions:
             overlayPlot(traces: conditionTraces(),
-                        caption: "Centroid per condition · \(members.count) subjects")
+                        caption: "Butterfly plot per condition · \(members.count) subjects")
         }
     }
 
@@ -197,37 +211,187 @@ private struct GroupDetail: View {
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Text(caption).font(.caption).foregroundStyle(.secondary)
-                OverlayWaveformView(
-                    traces: traces,
-                    samplingRate: overlaySamplingRate,
-                    baselineSamples: overlayBaseline,
-                    cursorSample: cursorBinding(max: traces.map(\.samples.count).max() ?? 1)
-                )
-                .frame(minHeight: 320)
+                HStack(spacing: 16) {
+                    Toggle("Show centroid", isOn: $showOverlayCentroid)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                    Toggle("Compare Topomaps", isOn: $compareTopomaps)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                }
+                HStack(alignment: .top, spacing: 16) {
+                    OverlayWaveformView(
+                        traces: traces,
+                        samplingRate: overlaySamplingRate,
+                        baselineSamples: overlayBaseline,
+                        showsCentroid: showOverlayCentroid,
+                        cursorSample: cursorBinding(max: traces.map(\.sampleCount).max() ?? 1)
+                    )
+                    .frame(minHeight: 320)
+                    .frame(maxWidth: .infinity)
+
+                    overlayTopomaps(traces: traces)
+                        .frame(width: compareTopomaps ? 340 : 320)
+                }
             }
         }
     }
 
-    /// One centroid trace per immediate sub-folder, for a condition.
+    @ViewBuilder
+    private func overlayTopomaps(traces: [OverlayTrace]) -> some View {
+        let mappable = traces.filter { $0.sensorLayout != nil }
+        if mappable.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Topography").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ContentUnavailableView("No Sensor Layout", systemImage: "circle.dashed")
+            }
+        } else {
+            let scale = overlayTopomapScale(for: mappable)
+            if compareTopomaps {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        Text("Topography").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        ForEach(mappable) { trace in
+                            overlayTopomapCard(for: trace, scale: scale)
+                        }
+                    }
+                }
+            } else if let combined = combinedTopomapTrace(from: mappable) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Topography").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    overlayTopomapCard(for: combined, scale: scale)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func overlayTopomapCard(for trace: OverlayTrace, scale: Double) -> some View {
+        if let layout = trace.sensorLayout {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Capsule().fill(trace.color).frame(width: 14, height: 3)
+                    Text(trace.label).font(.caption.weight(.semibold))
+                    Text("n=\(trace.contributing)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(String(format: "t = %.3f s", overlaySamplingRate > 0 ? Double(topomapSample) / overlaySamplingRate : 0))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                TopomapView(
+                    layout: layout,
+                    values: trace.samples.map { channel in
+                        topomapSample < channel.count ? Double(channel[topomapSample]) : 0
+                    },
+                    timeSeconds: overlaySamplingRate > 0 ? Double(topomapSample) / overlaySamplingRate : 0,
+                    fixedScale: scale,
+                    showsHeader: false,
+                    interpolationStep: compareTopomaps ? 6 : 7,
+                    usesVerticalColorBar: true,
+                    canvasMinHeight: compareTopomaps ? 190 : 230
+                )
+                .frame(height: compareTopomaps ? 250 : 290)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(trace.color.opacity(0.35), lineWidth: 1))
+            }
+        }
+    }
+
+    private func combinedTopomapTrace(from traces: [OverlayTrace]) -> OverlayTrace? {
+        guard let first = traces.first else { return nil }
+        let channelCount = first.samples.count
+        let sampleCount = first.sampleCount
+        guard channelCount > 0, sampleCount > 0 else { return nil }
+
+        var weighted = [[Double]](
+            repeating: [Double](repeating: 0, count: sampleCount),
+            count: channelCount
+        )
+        var totalWeight = 0
+        for trace in traces {
+            guard trace.samples.count == channelCount,
+                  trace.samples.allSatisfy({ $0.count == sampleCount }) else { continue }
+            let weight = max(trace.contributing, 1)
+            totalWeight += weight
+            for channelIndex in 0..<channelCount {
+                for sampleIndex in 0..<sampleCount {
+                    weighted[channelIndex][sampleIndex] += Double(trace.samples[channelIndex][sampleIndex]) * Double(weight)
+                }
+            }
+        }
+        guard totalWeight > 0 else { return nil }
+
+        let samples = weighted.map { channel in
+            channel.map { Float($0 / Double(totalWeight)) }
+        }
+        var centroid = [Float](repeating: 0, count: sampleCount)
+        for sampleIndex in 0..<sampleCount {
+            let total = samples.reduce(0.0) { partial, channel in
+                partial + Double(channel[sampleIndex])
+            }
+            centroid[sampleIndex] = Float(total / Double(channelCount))
+        }
+
+        return OverlayTrace(
+            id: "combined-topomap",
+            label: "Combined",
+            color: .secondary,
+            samples: samples,
+            centroid: centroid,
+            contributing: totalWeight,
+            sensorLayout: first.sensorLayout
+        )
+    }
+
+    private func overlayTopomapScale(for traces: [OverlayTrace]) -> Double {
+        let maxAbs = traces.reduce(0.0) { partial, trace in
+            let values = trace.samples.compactMap { channel in
+                topomapSample < channel.count ? Double(channel[topomapSample]) : nil
+            }
+            return max(partial, values.map(abs).max() ?? 0)
+        }
+        return maxAbs > 0 ? maxAbs : 1
+    }
+
+    private func scheduleTopomapUpdate(sample: Int) {
+        topomapUpdateTask?.cancel()
+        topomapUpdateTask = Task {
+            try? await Task.sleep(nanoseconds: 33_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                topomapSample = sample
+            }
+        }
+    }
+
+    /// One butterfly plot per immediate sub-folder, for a condition.
     private func subgroupTraces(condition name: String) -> [OverlayTrace] {
         children.enumerated().compactMap { index, child in
             guard let ga = GrandAverage.compute(datasets: child.datasets, condition: name) else { return nil }
             return OverlayTrace(
                 id: child.id, label: child.label,
                 color: OverlayWaveformView.palette[index % OverlayWaveformView.palette.count],
-                samples: ga.centroid, contributing: ga.contributing
+                samples: ga.samples,
+                centroid: ga.centroid,
+                contributing: ga.contributing,
+                sensorLayout: ga.sensorLayout
             )
         }
     }
 
-    /// One centroid trace per condition, for this whole group.
+    /// One butterfly plot per condition, for this whole group.
     private func conditionTraces() -> [OverlayTrace] {
         conditionNames.enumerated().compactMap { index, name in
             guard let ga = GrandAverage.compute(datasets: members, condition: name) else { return nil }
             return OverlayTrace(
                 id: name, label: name,
                 color: OverlayWaveformView.palette[index % OverlayWaveformView.palette.count],
-                samples: ga.centroid, contributing: ga.contributing
+                samples: ga.samples,
+                centroid: ga.centroid,
+                contributing: ga.contributing,
+                sensorLayout: ga.sensorLayout
             )
         }
     }
@@ -272,7 +436,8 @@ private struct GroupDetail: View {
                                 cursorSample < ch.count ? Double(ch[cursorSample]) : 0
                             },
                             timeSeconds: ga.samplingRate > 0 ? Double(cursorSample) / ga.samplingRate : 0,
-                            fixedScale: nil
+                            fixedScale: nil,
+                            usesVerticalColorBar: true
                         )
                         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2)))
