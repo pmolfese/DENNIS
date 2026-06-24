@@ -56,10 +56,20 @@ struct DetailView: View {
                 )
             }
         case .pls:
+            if case .group(let id) = selection {
+                PLSView(groupID: id).id(id)
+            } else {
+                ContentUnavailableView(
+                    "PLS Mode",
+                    systemImage: "arrow.triangle.branch",
+                    description: Text("Select a group in the sidebar to run a mean-centered (task) PLS.")
+                )
+            }
+        case .clustering:
             ContentUnavailableView(
-                "PLS Mode",
-                systemImage: "arrow.triangle.branch",
-                description: Text("Partial least squares analysis is coming soon.")
+                "Clustering Mode",
+                systemImage: "circle.grid.cross",
+                description: Text("Clustering analysis is coming soon.")
             )
         case .stats:
             StatisticalAnalysisView()

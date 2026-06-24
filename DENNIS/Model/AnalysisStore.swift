@@ -15,6 +15,7 @@ enum AppMode: String, CaseIterable, Identifiable {
     case pca = "PCA"
     case tensor = "Tensor"
     case pls = "PLS"
+    case clustering = "Clustering"
     case stats = "Statistical Analysis"
     var id: String { rawValue }
 }
