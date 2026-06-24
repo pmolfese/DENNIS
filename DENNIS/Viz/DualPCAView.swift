@@ -41,10 +41,6 @@ struct DualPCAView: View {
         return result.first.pattern.column(factor.firstIndex)
     }
 
-    private var sortedFactors: [TwoStepFactor] {
-        result.factors.sorted { $0.variance > $1.variance }
-    }
-
     /// Largest absolute spatial loading across all factors.
     private var maxAbsLoading: Double {
         result.second.flatMap { $0.pattern.grid }.map(abs).max() ?? 1
@@ -52,29 +48,6 @@ struct DualPCAView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("\(result.factors.count) combined factors · "
-                 + String(format: "%.0f%% total variance", result.totalVariance * 100))
-                .font(.caption).foregroundStyle(.secondary)
-
-            if result.firstMode == .temporal {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("First step — temporal factor loadings")
-                            .font(.subheadline.weight(.semibold))
-                        Spacer()
-                        Button {
-                            ImageExport.savePNG(
-                                TemporalPCAView(model: TemporalPCAResult(result: result.first,
-                                                                         timesMS: result.firstTimesMS)),
-                                suggestedName: "temporal_loadings")
-                        } label: { Label("Save PNG", systemImage: "square.and.arrow.down") }
-                            .buttonStyle(.borderless).font(.caption)
-                    }
-                    TemporalPCAView(model: TemporalPCAResult(result: result.first,
-                                                             timesMS: result.firstTimesMS))
-                }
-            }
-
             if let layout = sensorLayout {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -131,20 +104,33 @@ struct DualPCAView: View {
                     }
                 }
             }
+        }
+    }
+}
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Combined factors").font(.subheadline.weight(.semibold))
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 4) {
-                    GridRow {
-                        Text("Factor").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Text("Variance").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    }
-                    ForEach(Array(sortedFactors.enumerated()), id: \.offset) { _, factor in
-                        GridRow {
-                            Text(factor.name).font(.callout.monospaced())
-                            Text(String(format: "%.1f%%", factor.variance * 100))
-                                .font(.callout.monospacedDigit())
-                        }
+/// A compact, multi-column listing of the combined (TF×SF) factors ranked by
+/// variance share. Wraps into as many columns as the available width allows so
+/// it stays short rather than one long skinny column.
+struct CombinedFactorsTable: View {
+    let result: TwoStepPCAResult
+
+    private var sortedFactors: [TwoStepFactor] {
+        result.factors.sorted { $0.variance > $1.variance }
+    }
+
+    private let columns = [GridItem(.adaptive(minimum: 130, maximum: 240), spacing: 10)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(format: "%.0f%% total variance", result.totalVariance * 100))
+                .font(.caption).foregroundStyle(.secondary)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                ForEach(Array(sortedFactors.enumerated()), id: \.offset) { _, factor in
+                    HStack(spacing: 8) {
+                        Text(factor.name).font(.callout.monospaced())
+                        Spacer(minLength: 6)
+                        Text(String(format: "%.1f%%", factor.variance * 100))
+                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                     }
                 }
             }

@@ -57,7 +57,7 @@ struct ScreePlotView: View {
             ])
             .chartXAxisLabel("Factor")
             .chartYAxisLabel("Eigenvalue")
-            .frame(minHeight: 280)
+            .frame(minHeight: 200)
         }
     }
 

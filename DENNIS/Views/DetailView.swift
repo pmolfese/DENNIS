@@ -179,9 +179,7 @@ private struct GroupDetail: View {
                 Divider()
                 preprocessingSection
                 Divider()
-                screeSection
-                Divider()
-                temporalPCASection
+                temporalRow
                 Divider()
                 dualPCASection
                 if dualModel != nil, let bundle = analysis.dual, bundle.groupID == groupID {
@@ -390,45 +388,78 @@ private struct GroupDetail: View {
     // MARK: - Scree / parallel analysis
 
     @ViewBuilder
-    private var screeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Scree / Parallel Analysis").font(.headline)
+    /// Temporal scree and temporal loadings, shown side by side.
+    private var temporalRow: some View {
+        HStack(alignment: .top, spacing: 20) {
+            temporalScreeColumn.frame(maxWidth: .infinity, alignment: .leading)
+            Divider()
+            temporalLoadingsColumn.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var temporalScreeColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("Temporal Scree").font(.headline)
+                HelpButton(text: "Runs an unrotated PCA on the time dimension and compares its "
+                           + "eigenvalues against random data of the same shape, to suggest how many "
+                           + "temporal factors to retain.")
                 Spacer()
-                Picker("PCA mode", selection: $screeMode) {
-                    Text("Temporal").tag(PCAMode.temporal)
-                    Text("Spatial").tag(PCAMode.spatial)
+                if let analysis = screeAnalysis {
+                    savePNGButton("temporal_scree") { ScreePlotView(analysis: analysis) }
                 }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .onChange(of: screeMode) { _, _ in screeAnalysis = nil; screeError = nil }
-
-                Button {
-                    runScree()
-                } label: {
-                    Label("Run Scree", systemImage: "chart.xyaxis.line")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(conditionNames.isEmpty || loadedCount == 0 || screeRunning)
+                Button { runScree() } label: { Label("Run", systemImage: "chart.xyaxis.line") }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(conditionNames.isEmpty || loadedCount == 0 || screeRunning)
             }
-
-            if screeRunning {
-                progressBar(screeProgress)
-            }
-
+            if screeRunning { progressBar(screeProgress) }
             if conditionNames.isEmpty {
-                Text("No shared conditions across these subjects yet (still loading?).")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("No shared conditions yet.").font(.caption).foregroundStyle(.secondary)
             } else if let error = screeError {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let analysis = screeAnalysis {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack { Spacer(); savePNGButton("\(screeMode.rawValue)_scree") { ScreePlotView(analysis: analysis) } }
-                    ScreePlotView(analysis: analysis)
-                }
+                ScreePlotView(analysis: analysis)
             } else {
-                Text("Runs an unrotated PCA on the \(screeMode == .temporal ? "time" : "channel") "
-                     + "dimension and compares its eigenvalues against random data of the same shape.")
+                Text("Run to estimate the temporal factor count.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var temporalLoadingsColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("Temporal PCA").font(.headline)
+                HelpButton(text: "Runs a temporal PCA (time points as variables) and plots each "
+                           + "factor's loading as a waveform. Use the scree at left to pick a factor count.")
+                Spacer()
+                if let model = pcaModel {
+                    savePNGButton("temporal_loadings") { TemporalPCAView(model: model) }
+                }
+            }
+            HStack {
+                Stepper("Factors: \(pcaFactors)", value: $pcaFactors, in: 1...20).fixedSize()
+                Picker("Rotation", selection: $pcaRotation) {
+                    Text("Promax").tag(PCARotation.promax)
+                    Text("Varimax").tag(PCARotation.varimax)
+                    Text("Infomax").tag(PCARotation.infomax)
+                    Text("Extended Infomax").tag(PCARotation.extendedInfomax)
+                    Text("Unrotated").tag(PCARotation.unrotated)
+                }
+                .fixedSize()
+                Button { runTemporalPCA() } label: { Label("Run", systemImage: "waveform.path.ecg.rectangle") }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(conditionNames.isEmpty || loadedCount == 0 || pcaRunning)
+            }
+            if pcaRunning { progressBar(pcaProgress) }
+            if conditionNames.isEmpty {
+                Text("No shared conditions yet.").font(.caption).foregroundStyle(.secondary)
+            } else if let error = pcaError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            } else if let model = pcaModel {
+                TemporalPCAView(model: model)
+            } else {
+                Text("Run to plot temporal factor loadings.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -493,52 +524,6 @@ private struct GroupDetail: View {
     // MARK: - Temporal PCA
 
     @ViewBuilder
-    private var temporalPCASection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Temporal PCA").font(.headline)
-                Spacer()
-                Stepper("Factors: \(pcaFactors)", value: $pcaFactors, in: 1...20)
-                    .fixedSize()
-                Picker("Rotation", selection: $pcaRotation) {
-                    Text("Promax").tag(PCARotation.promax)
-                    Text("Varimax").tag(PCARotation.varimax)
-                    Text("Infomax").tag(PCARotation.infomax)
-                    Text("Extended Infomax").tag(PCARotation.extendedInfomax)
-                    Text("Unrotated").tag(PCARotation.unrotated)
-                }
-                .fixedSize()
-                Button {
-                    runTemporalPCA()
-                } label: {
-                    Label("Run PCA", systemImage: "waveform.path.ecg.rectangle")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(conditionNames.isEmpty || loadedCount == 0 || pcaRunning)
-            }
-
-            if pcaRunning {
-                progressBar(pcaProgress)
-            }
-
-            if conditionNames.isEmpty {
-                Text("No shared conditions across these subjects yet (still loading?).")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else if let error = pcaError {
-                Text(error).font(.caption).foregroundStyle(.red)
-            } else if let model = pcaModel {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack { Spacer(); savePNGButton("temporal_loadings") { TemporalPCAView(model: model) } }
-                    TemporalPCAView(model: model)
-                }
-            } else {
-                Text("Runs a temporal PCA (time points as variables) and plots each "
-                     + "factor's loading as a waveform. Use the scree plot above to pick a "
-                     + "factor count.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
 
     private func runTemporalPCA() {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
@@ -591,8 +576,13 @@ private struct GroupDetail: View {
     @ViewBuilder
     private var dualPCASection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(spacing: 6) {
                 Text("Dual PCA (Temporal → Spatial)").font(.headline)
+                HelpButton(text: "Runs a temporal PCA, then a spatial PCA on each temporal factor's "
+                           + "scores (the ERP Toolkit dual decomposition). The first step uses the "
+                           + "temporal rotation above; the second step uses the rotation here. Spatial "
+                           + "factors are chosen per temporal factor — run the spatial scree to estimate "
+                           + "how many to retain.")
                 Spacer()
                 Stepper("Spatial factors: \(dualSpatialFactors)", value: $dualSpatialFactors, in: 1...20)
                     .fixedSize()
@@ -603,65 +593,66 @@ private struct GroupDetail: View {
                     Text("Varimax").tag(PCARotation.varimax)
                 }
                 .fixedSize()
-                Button {
-                    runSpatialScree()
-                } label: {
-                    Label("Spatial Scree", systemImage: "chart.xyaxis.line")
-                }
-                .buttonStyle(.bordered)
-                .disabled(conditionNames.isEmpty || loadedCount == 0 || spatialScreeRunning)
-
-                Button {
-                    runDualPCA()
-                } label: {
-                    Label("Run Dual PCA", systemImage: "square.stack.3d.up")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(conditionNames.isEmpty || loadedCount == 0 || dualRunning)
+                Button { runSpatialScree() } label: { Label("Spatial Scree", systemImage: "chart.xyaxis.line") }
+                    .buttonStyle(.bordered)
+                    .disabled(conditionNames.isEmpty || loadedCount == 0 || spatialScreeRunning)
+                Button { runDualPCA() } label: { Label("Run Dual PCA", systemImage: "square.stack.3d.up") }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(conditionNames.isEmpty || loadedCount == 0 || dualRunning)
             }
 
-            Text("Spatial factors are chosen per temporal factor. Run the spatial scree "
-                 + "to estimate how many to retain (uses the temporal factor count and "
-                 + "rotation above).")
-                .font(.caption).foregroundStyle(.secondary)
+            if spatialScreeRunning { progressBar(spatialScreeProgress) }
+            if dualRunning { progressBar(dualProgress) }
 
-            if spatialScreeRunning {
-                progressBar(spatialScreeProgress)
-            }
-            if let error = spatialScreeError {
-                Text(error).font(.caption).foregroundStyle(.red)
-            } else if let scree = spatialScree {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Spatial scree (second step)").font(.subheadline.weight(.semibold))
-                        Spacer()
-                        savePNGButton("spatial_scree") { ScreePlotView(analysis: scree) }
+            // Combined-factor variance and spatial scree, side by side.
+            if dualModel != nil || spatialScree != nil || spatialScreeError != nil {
+                HStack(alignment: .top, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Combined factors").font(.subheadline.weight(.semibold))
+                        if let model = dualModel {
+                            CombinedFactorsTable(result: model)
+                        } else {
+                            Text("Run the dual PCA to see combined-factor variance.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                    ScreePlotView(analysis: scree)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Spatial scree (second step)").font(.subheadline.weight(.semibold))
+                            Spacer()
+                            if let scree = spatialScree {
+                                savePNGButton("spatial_scree") { ScreePlotView(analysis: scree) }
+                            }
+                        }
+                        if let error = spatialScreeError {
+                            Text(error).font(.caption).foregroundStyle(.red)
+                        } else if let scree = spatialScree {
+                            ScreePlotView(analysis: scree)
+                        } else {
+                            Text("Run the spatial scree to estimate spatial factors.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
-            if dualRunning {
-                progressBar(dualProgress)
-            }
-
+            // Temporal-spatial factor maps on their own.
             if conditionNames.isEmpty {
                 Text("No shared conditions across these subjects yet (still loading?).")
                     .font(.caption).foregroundStyle(.secondary)
             } else if let error = dualError {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let model = dualModel {
+                Divider()
                 DualPCAView(result: model, sensorLayout: groupSensorLayout,
                             clusterSubjects: clusterSubjects,
                             clusterConditionNames: conditionNames,
                             clusterFactorNames: study.factors.map(\.name),
                             clusterBaseline: clusterBaseline,
                             clusterSamplingRate: clusterSamplingRate)
-            } else {
-                Text("Runs a temporal PCA, then a spatial PCA on each temporal factor's "
-                     + "scores (the ERP Toolkit dual decomposition). The first step uses the "
-                     + "rotation chosen above; the second step uses the rotation here.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }

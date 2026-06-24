@@ -61,23 +61,22 @@ struct PCAExportView: View {
                         label: store.label),
                          name: "\(safe(bundle.groupLabel))_factor_scores")
                 } label: { Label("Factor Scores", systemImage: "tablecells") }
+                .help("One row per subject, one column per factor × condition. "
+                      + "Uses labels set in the Statistical Analysis tab.")
 
                 Button {
                     save(CSVBuilders.temporalLoadings(bundle, label: store.label),
                          name: "\(safe(bundle.groupLabel))_temporal_loadings")
                 } label: { Label("Temporal Loadings", systemImage: "waveform") }
+                .help("One row per time point, one column per temporal factor loading.")
 
                 Button {
                     save(CSVBuilders.spatialLoadings(bundle, label: store.label),
                          name: "\(safe(bundle.groupLabel))_spatial_loadings")
                 } label: { Label("Spatial Loadings", systemImage: "circle.grid.cross") }
+                .help("One row per channel, one column per combined factor's spatial loading.")
             }
             .buttonStyle(.bordered)
-
-            Text("Factor scores export one row per subject, one column per factor × "
-                 + "condition. Loadings export time points (temporal) and channels (spatial) "
-                 + "against each factor. Labels set in the Statistical Analysis tab are used here.")
-                .font(.caption).foregroundStyle(.secondary)
         }
         .alert("Export Failed", isPresented: Binding(
             get: { exportError != nil }, set: { if !$0 { exportError = nil } }

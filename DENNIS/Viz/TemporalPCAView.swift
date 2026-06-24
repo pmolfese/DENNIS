@@ -70,7 +70,7 @@ struct TemporalPCAView: View {
             }
             .chartXAxisLabel("Time (ms)")
             .chartYAxisLabel("Loading")
-            .frame(minHeight: 300)
+            .frame(minHeight: 200)
         }
     }
 }
