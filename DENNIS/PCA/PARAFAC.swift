@@ -68,11 +68,18 @@ nonisolated enum PARAFAC {
         }
     }
 
+    private struct StartResult: Sendable {
+        let start: Int
+        let fit: Double
+        let factors: [Matrix]
+        let iterations: Int
+    }
+
     /// Run multi-start CP-ALS and return the best (highest-fit) solution.
     static func decompose(_ tensor: MultiwayTensor,
                           modeNames: [String],
                           options: Options,
-                          report: (@Sendable (Double, String) -> Void)? = nil) throws -> CPResult {
+                          report: (@Sendable (Double, String) -> Void)? = nil) async throws -> CPResult {
         let n = tensor.order
         let dims = tensor.dims
         let r = options.rank
@@ -83,47 +90,56 @@ nonisolated enum PARAFAC {
         // Unfoldings are fixed; compute once and share across starts/iterations.
         let unfoldings = (0..<n).map { tensor.unfold(mode: $0) }
 
-        var rng = SplitMix64(seed: options.seed)
-        var bestFactors: [Matrix] = []
-        var bestFit = -Double.infinity
-        var bestIters = 0
-        var bestCount = 0
+        let starts = max(options.nStarts, 1)
+        var completedStarts = 0
+        var candidates: [StartResult] = []
 
-        for start in 0..<max(options.nStarts, 1) {
-            report?(Double(start) / Double(max(options.nStarts, 1)), "ALS start \(start + 1)/\(options.nStarts)")
-            var factors = (0..<n).map {
-                randomMatrix(rows: dims[$0], cols: r, rng: &rng, nonnegative: options.nonnegative)
+        await withTaskGroup(of: StartResult.self) { group in
+            for start in 0..<starts {
+                group.addTask {
+                    var rng = SplitMix64(seed: seed(for: options.seed, start: start))
+                    var factors = (0..<n).map {
+                        randomMatrix(rows: dims[$0], cols: r, rng: &rng, nonnegative: options.nonnegative)
+                    }
+                    var prevFit = -Double.infinity
+                    var fit = 0.0
+                    var iters = 0
+
+                    while iters < options.maxIter {
+                        fit = sweep(&factors, unfoldings: unfoldings, normX2: normX2,
+                                    nonnegative: options.nonnegative)
+                        iters += 1
+                        if fit - prevFit < options.tol { break }
+                        prevFit = fit
+                    }
+
+                    return StartResult(start: start, fit: fit, factors: factors, iterations: iters)
+                }
             }
-            var prevFit = -Double.infinity
-            var fit = 0.0
-            var iters = 0
 
-            while iters < options.maxIter {
-                fit = sweep(&factors, unfoldings: unfoldings, normX2: normX2,
-                            nonnegative: options.nonnegative)
-                iters += 1
-                if fit - prevFit < options.tol { break }
-                prevFit = fit
-            }
-
-            if fit > bestFit + 1e-9 {
-                bestFit = fit
-                bestFactors = factors
-                bestIters = iters
-                bestCount = 1
-            } else if abs(fit - bestFit) <= 1e-6 {
-                bestCount += 1
+            for await candidate in group {
+                candidates.append(candidate)
+                completedStarts += 1
+                report?(Double(completedStarts) / Double(starts) * 0.96,
+                        "ALS starts \(completedStarts)/\(starts)")
             }
         }
 
+        let sorted = candidates.sorted {
+            if abs($0.fit - $1.fit) > 1e-9 { return $0.fit > $1.fit }
+            return $0.start < $1.start
+        }
+        guard let best = sorted.first else { throw PARAFACError.emptyTensor }
+        let bestCount = candidates.filter { abs($0.fit - best.fit) <= 1e-6 }.count
+
         report?(0.97, "Normalizing components")
-        var (factors, weights) = normalize(bestFactors)
+        var (factors, weights) = normalize(best.factors)
         sortByWeight(&factors, &weights)
         fixSigns(&factors)
 
         return CPResult(
             factors: factors, weights: weights, modeNames: modeNames, dims: dims, rank: r,
-            fit: bestFit, iterations: bestIters, nStarts: options.nStarts,
+            fit: best.fit, iterations: best.iterations, nStarts: options.nStarts,
             bestStartCount: bestCount, maxCongruence: maxCongruence(factors)
         )
     }
@@ -219,6 +235,10 @@ nonisolated enum PARAFAC {
             grid[i] = nonnegative ? abs(value) : value
         }
         return Matrix(rows: rows, cols: cols, columnMajor: grid)
+    }
+
+    private static func seed(for base: UInt64, start: Int) -> UInt64 {
+        base &+ UInt64(start) &* 0x9E3779B97F4A7C15
     }
 
     // MARK: - Post-processing

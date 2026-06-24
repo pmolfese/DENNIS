@@ -37,8 +37,19 @@ nonisolated enum MultiwayDiagnostics {
                              modeNames: [String],
                              maxComponents: Int = 20,
                              parallelReps: Int = 0,
-                             seed: UInt64 = 0) throws -> [ModeScree] {
-        let dataSpectra = try (0..<tensor.order).map { try modeSingularValues(tensor, mode: $0) }
+                             seed: UInt64 = 0,
+                             report: PCAProgressHandler? = nil) throws -> [ModeScree] {
+        let dataWeight = parallelReps > 0 ? 0.35 : 0.95
+        var dataSpectra: [[Double]] = []
+        dataSpectra.reserveCapacity(tensor.order)
+        for n in 0..<tensor.order {
+            let name = n < modeNames.count ? modeNames[n] : "Mode \(n + 1)"
+            report?(dataWeight * Double(n) / Double(max(tensor.order, 1)),
+                    "Mode spectra \(n + 1)/\(tensor.order) · \(name)")
+            dataSpectra.append(try modeSingularValues(tensor, mode: n))
+            breathe()
+        }
+        report?(dataWeight, "Mode spectra done")
 
         // Parallel analysis: average random-tensor spectra, matched in variance.
         var floors = [[Double]](repeating: [], count: tensor.order)
@@ -46,15 +57,23 @@ nonisolated enum MultiwayDiagnostics {
             let std = (tensor.frobeniusNormSquared / Double(max(tensor.count, 1))).squareRoot()
             var rng = SplitMix64(seed: seed)
             var sums = (0..<tensor.order).map { [Double](repeating: 0, count: tensor.dims[$0]) }
-            for _ in 0..<parallelReps {
+            for rep in 0..<parallelReps {
+                let repBase = Double(rep) / Double(parallelReps)
+                report?(dataWeight + 0.6 * repBase,
+                        "Random reference \(rep + 1)/\(parallelReps) · drawing tensor")
                 let random = MultiwayTensor.randomNormal(dims: tensor.dims, std: std, rng: &rng)
                 for n in 0..<tensor.order {
+                    let modeStep = (repBase + Double(n) / Double(max(tensor.order, 1)) / Double(parallelReps))
+                    report?(dataWeight + 0.6 * modeStep,
+                            "Random reference \(rep + 1)/\(parallelReps) · mode \(n + 1)/\(tensor.order)")
                     let sv = try modeSingularValues(random, mode: n)
                     for i in sv.indices { sums[n][i] += sv[i] }
+                    breathe()
                 }
             }
             floors = sums.map { $0.map { $0 / Double(parallelReps) } }
         }
+        report?(0.97, "Summarizing mode spectra")
 
         return (0..<tensor.order).map { n in
             let eigs = dataSpectra[n]                          // descending singular values
@@ -124,7 +143,7 @@ nonisolated enum MultiwayDiagnostics {
             var a = 0
             while a < nModes { idx[a] += 1; if idx[a] < r { break }; idx[a] = 0; a += 1 }
         }
-        return 100 * (1 - numerator / Double(r))             // ‖superdiagonal‖² = R
+        return min(100, 100 * (1 - numerator / Double(r)))   // ‖superdiagonal‖² = R
     }
 
     // MARK: - Fit / core-consistency sweep over rank
@@ -140,7 +159,7 @@ nonisolated enum MultiwayDiagnostics {
     /// reporting the ALS progress and the running fit/CORCONDIA per rank.
     static func rankSweep(_ tensor: MultiwayTensor, modeNames: [String],
                           maxRank: Int, nStarts: Int = 4, seed: UInt64 = 0, nonnegative: Bool = false,
-                          report: (@Sendable (Double, String) -> Void)? = nil) throws -> [RankPoint] {
+                          report: (@Sendable (Double, String) -> Void)? = nil) async throws -> [RankPoint] {
         var points: [RankPoint] = []
         for r in 1...maxRank {
             let lo = Double(r - 1) / Double(maxRank)
@@ -148,7 +167,7 @@ nonisolated enum MultiwayDiagnostics {
             let inner: @Sendable (Double, String) -> Void = { fraction, stage in
                 report?(lo + span * fraction * 0.85, "Rank \(r)/\(maxRank) · \(stage)")
             }
-            let result = try PARAFAC.decompose(
+            let result = try await PARAFAC.decompose(
                 tensor, modeNames: modeNames,
                 options: .init(rank: r, nStarts: nStarts, seed: seed, nonnegative: nonnegative),
                 report: inner)
@@ -173,17 +192,17 @@ nonisolated enum MultiwayDiagnostics {
     /// shared (non-subject) modes. Replicable components score near 1.
     static func splitHalfReliability(_ tensor: MultiwayTensor, subjectMode: Int,
                                      modeNames: [String], rank: Int, nStarts: Int = 4,
-                                     seed: UInt64 = 0, nonnegative: Bool = false) throws -> SplitHalf {
+                                     seed: UInt64 = 0, nonnegative: Bool = false) async throws -> SplitHalf {
         let nSubjects = tensor.dims[subjectMode]
         let halfA = stride(from: 0, to: nSubjects, by: 2).map { $0 }
         let halfB = stride(from: 1, to: nSubjects, by: 2).map { $0 }
         guard halfA.count >= 2, halfB.count >= 2 else {
             return SplitHalf(meanCongruence: 0, perComponent: [])
         }
-        let resultA = try PARAFAC.decompose(
+        let resultA = try await PARAFAC.decompose(
             tensor.selecting(mode: subjectMode, indices: halfA),
             modeNames: modeNames, options: .init(rank: rank, nStarts: nStarts, seed: seed, nonnegative: nonnegative))
-        let resultB = try PARAFAC.decompose(
+        let resultB = try await PARAFAC.decompose(
             tensor.selecting(mode: subjectMode, indices: halfB),
             modeNames: modeNames, options: .init(rank: rank, nStarts: nStarts, seed: seed &+ 1, nonnegative: nonnegative))
 
@@ -222,5 +241,9 @@ nonisolated enum MultiwayDiagnostics {
         let gram = gramRows(tensor.unfold(mode: n))
         let (eigsAscending, _) = try gram.symmetricEigen()
         return eigsAscending.reversed().map { max($0, 0).squareRoot() }
+    }
+
+    private static func breathe() {
+        Thread.sleep(forTimeInterval: 0.001)
     }
 }

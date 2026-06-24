@@ -22,7 +22,7 @@ nonisolated enum TFTransform: String, CaseIterable, Sendable {
     case logBaseline = "dB vs baseline"
 }
 
-nonisolated enum TFModeType: Sendable { case channel, time, frequency, condition, subject }
+nonisolated enum TFModeType: Sendable { case channel, time, frequency, condition, subject, feature }
 
 nonisolated struct TFTensor: Sendable {
     let tensor: MultiwayTensor
@@ -51,7 +51,8 @@ nonisolated enum TFTensorBuilder {
     }
 
     /// Assemble the TF tensor. Safe to call off the main actor (heavy).
-    static func build(from input: EPTensor.Input, parameters p: Parameters) -> TFTensor {
+    static func build(from input: EPTensor.Input, parameters p: Parameters,
+                      report: PCAProgressHandler? = nil) -> TFTensor {
         let sfreq = input.samplingRate
         let baseline = input.baselineSamples
         let nCh = input.nChannels
@@ -59,6 +60,7 @@ nonisolated enum TFTensorBuilder {
         let nSubj = input.subjects.count
 
         // A reference TF gives the shared frequency and time axes.
+        report?(0, "Preparing time-frequency axes…")
         let reference = referenceSignal(input)
         let refTF = TimeFrequency.transform(signal: reference, sfreq: sfreq, config: p.config)
         let freqs = refTF.freqs
@@ -95,19 +97,28 @@ nonisolated enum TFTensorBuilder {
 
         let strides = fortranStrides(dims)
         var data = [Double](repeating: 0, count: dims.reduce(1, *))
+        let totalJobs = max(1, nSubj * nCond * nCh)
+        var completedJobs = 0
 
         for (subj, cells) in input.subjects.enumerated() {
             for cell in 0..<min(nCond, cells.count) {
                 let channels = cells[cell]
                 for ch in 0..<min(nCh, channels.count) {
+                    if completedJobs % 16 == 0 {
+                        report?(Double(completedJobs) / Double(totalJobs),
+                                "Time-frequency transform \(completedJobs + 1)/\(totalJobs)")
+                    }
                     let raw = TimeFrequency.transform(signal: channels[ch], sfreq: sfreq, config: p.config).power
                     let power = transformed(raw, transform: p.transform, baselineMask: baselineMask)
                     place(power: power, into: &data, strides: strides, structure: p.structure,
                           ch: ch, cell: cell, subj: subj, keptT: keptT, freqCount: freqs.count,
                           windowT: windowT, bandF: bandF)
+                    completedJobs += 1
+                    if completedJobs % 8 == 0 { breathe() }
                 }
             }
         }
+        report?(1, "Time-frequency tensor assembled")
 
         return TFTensor(tensor: MultiwayTensor(dims: dims, data: data),
                         modeNames: modeNames, modeTypes: modeTypes,
@@ -179,5 +190,11 @@ nonisolated enum TFTensorBuilder {
         var s = [Int](repeating: 1, count: dims.count)
         for a in 1..<dims.count { s[a] = s[a - 1] * dims[a - 1] }
         return s
+    }
+
+    /// Give AppKit's main run loop a chance to draw while a large TF tensor is
+    /// assembled from hundreds or thousands of per-channel transforms.
+    private static func breathe() {
+        Thread.sleep(forTimeInterval: 0.001)
     }
 }

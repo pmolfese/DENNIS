@@ -14,6 +14,10 @@ import AppKit
 import UniformTypeIdentifiers
 
 nonisolated enum TensorSource: String, CaseIterable { case erp = "ERP", timeFrequency = "Time-frequency" }
+nonisolated enum TensorAlgorithm: String, CaseIterable {
+    case parafac = "PARAFAC"
+    case parafac2 = "PARAFAC2"
+}
 
 struct TensorView: View {
     @Environment(Study.self) private var study
@@ -58,8 +62,10 @@ struct TensorView: View {
     @State private var recommendedRank = 3
     @State private var diagRunning = false
     @State private var diagError: String?
+    @State private var diagProgress = RunProgress()
 
     // PARAFAC + mode metadata of the current result.
+    @State private var algorithm: TensorAlgorithm = .parafac
     @State private var rank = 3
     @State private var nStarts = 10
     @State private var cpResult: CPResult?
@@ -137,8 +143,12 @@ struct TensorView: View {
     private var dimsSummary: String? {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
         let input = snapshot.input
-        return "\(input.nChannels) ch · \(input.nTimes) samples · \(input.conditionCount) cond · "
-            + "\(snapshot.subjects.count) subj"
+        let nTimes = currentTimeAxis()?.indices.count ?? input.nTimes
+        let nCond = poolConditions ? 1 : input.conditionCount
+        let nSubj = snapshot.subjects.count
+        let elements = input.nChannels * nTimes * nCond * nSubj
+        return "\(input.nChannels) ch × \(nTimes) time × \(nCond) cond × \(nSubj) subj"
+            + "  ·  \(elements.formatted()) elements"
     }
 
     // MARK: - ERP preprocessing
@@ -260,9 +270,10 @@ struct TensorView: View {
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || diagRunning)
             }
             if diagRunning {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Assembling tensor and computing mode spectra…").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: diagProgress.fraction)
+                    Text(diagProgress.stage.isEmpty ? "Assembling tensor and computing mode spectra…" : diagProgress.stage)
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
             if let error = diagError {
@@ -328,20 +339,25 @@ struct TensorView: View {
         }
     }
 
-    // MARK: - PARAFAC
+    // MARK: - Tensor model
 
     private var parafacSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
-                Text("PARAFAC").font(.headline)
-                HelpButton(text: "CANDECOMP/PARAFAC by alternating least squares — each component is one "
-                           + "loading per mode, estimated jointly and (unlike PCA) without a rotation "
-                           + "choice. Raw-power time-frequency tensors use nonnegative PARAFAC. Multiple "
-                           + "random starts guard against local minima.")
+                Text("Tensor model").font(.headline)
+                HelpButton(text: "PARAFAC estimates one loading per mode. PARAFAC2 slices by subject "
+                           + "and allows the time mode to vary by subject, which can capture ERP latency "
+                           + "or waveform-shape differences. In PARAFAC2, non-time modes are folded into "
+                           + "one feature mode and CORCONDIA is not reported.")
                 Spacer()
+                Picker("Algorithm", selection: $algorithm) {
+                    ForEach(TensorAlgorithm.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .fixedSize()
+                .onChange(of: algorithm) { _, _ in clearModelResult() }
                 Stepper("Rank \(rank)", value: $rank, in: 1...20).fixedSize()
                 Stepper("Starts \(nStarts)", value: $nStarts, in: 1...50).fixedSize()
-                Button { runPARAFAC() } label: { Label("Run PARAFAC", systemImage: "cube") }
+                Button { runTensorModel() } label: { Label("Run", systemImage: "cube") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || cpRunning)
             }
@@ -464,7 +480,8 @@ struct TensorView: View {
 
     private static func assemble(source: TensorSource, input: EPTensor.Input, timeIndices: [Int]?,
                                  preprocessing: (subjects: Bool, time: Bool, channels: Bool),
-                                 tfParams: TFTensorBuilder.Parameters, poolConditions: Bool) -> Assembly {
+                                 tfParams: TFTensorBuilder.Parameters, poolConditions: Bool,
+                                 report: PCAProgressHandler? = nil) -> Assembly {
         let base: Assembly
         switch source {
         case .erp:
@@ -479,7 +496,7 @@ struct TensorView: View {
                             modeTypes: [.channel, .time, .condition, .subject],
                             freqs: [], timesMS: timesMS, nonnegative: false)
         case .timeFrequency:
-            let tf = TFTensorBuilder.build(from: input, parameters: tfParams)
+            let tf = TFTensorBuilder.build(from: input, parameters: tfParams, report: report)
             base = Assembly(tensor: tf.tensor, modeNames: tf.modeNames, modeTypes: tf.modeTypes,
                             freqs: tf.freqs, timesMS: tf.timesMS, nonnegative: tf.nonnegative)
         }
@@ -504,7 +521,7 @@ struct TensorView: View {
 
     private func runPreview() {
         guard let (input, _, _, params) = assemblyInputs() else { return }
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .utility) {
             // Grand-average a representative midline channel across subjects (cell 0).
             let ch = input.nChannels / 2
             var mean = [Float](repeating: 0, count: input.nTimes)
@@ -544,12 +561,23 @@ struct TensorView: View {
         let reps = parallelAnalysis ? parallelReps : 0
         let src = source
         let pool = poolConditions
+        let report = diagProgress.handler()
+        diagProgress.reset()
         diagRunning = true; diagError = nil
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .utility) {
             let outcome: Result<[ModeScree], Error>
             do {
-                let a = Self.assemble(source: src, input: input, timeIndices: timeIndices, preprocessing: pre, tfParams: tfP, poolConditions: pool)
-                outcome = .success(try MultiwayDiagnostics.perModeScree(a.tensor, modeNames: a.modeNames, parallelReps: reps))
+                report(0.02, src == .timeFrequency ? "Assembling time-frequency tensor…" : "Assembling ERP tensor…")
+                let a = Self.assemble(
+                    source: src, input: input, timeIndices: timeIndices, preprocessing: pre,
+                    tfParams: tfP, poolConditions: pool) { fraction, stage in
+                        report(0.02 + 0.28 * fraction, stage)
+                    }
+                report(0.30, "Computing mode spectra…")
+                outcome = .success(try MultiwayDiagnostics.perModeScree(
+                    a.tensor, modeNames: a.modeNames, parallelReps: reps) { fraction, stage in
+                        report(0.30 + 0.68 * fraction, stage)
+                    })
             } catch { outcome = .failure(error) }
             await MainActor.run {
                 diagRunning = false
@@ -566,7 +594,7 @@ struct TensorView: View {
         }
     }
 
-    private func runPARAFAC() {
+    private func runTensorModel() {
         guard let (input, timeIndices, pre, tfP) = assemblyInputs() else {
             cpResult = nil; cpError = "No dimension-consistent loaded data to analyze yet."; return
         }
@@ -574,27 +602,44 @@ struct TensorView: View {
         let report = cpProgress.handler()
         let src = source
         let pool = poolConditions
+        let model = algorithm
         cpProgress.reset(); cpRunning = true; cpError = nil
         Task.detached(priority: .userInitiated) {
             let outcome: Result<(CPResult, Double, [TFModeType], [Double], [Double]), Error>
             do {
                 report(0.02, "Assembling tensor")
                 let a = Self.assemble(source: src, input: input, timeIndices: timeIndices, preprocessing: pre, tfParams: tfP, poolConditions: pool)
-                var options = options0; options.nonnegative = a.nonnegative
-                let result = try PARAFAC.decompose(a.tensor, modeNames: a.modeNames, options: options, report: report)
-                report(0.99, "Core consistency")
-                let cc = MultiwayDiagnostics.coreConsistency(tensor: a.tensor, result: result)
-                outcome = .success((result, cc, a.modeTypes, a.freqs, a.timesMS))
+                switch model {
+                case .parafac:
+                    var options = options0; options.nonnegative = a.nonnegative
+                    let result = try await PARAFAC.decompose(a.tensor, modeNames: a.modeNames, options: options, report: report)
+                    report(0.99, "Core consistency")
+                    let cc = MultiwayDiagnostics.coreConsistency(tensor: a.tensor, result: result)
+                    outcome = .success((result, cc, a.modeTypes, a.freqs, a.timesMS))
+                case .parafac2:
+                    guard let subjectMode = a.modeTypes.firstIndex(of: .subject),
+                          let varyingMode = a.modeTypes.firstIndex(of: .time) ?? a.modeTypes.firstIndex(of: .frequency) else {
+                        throw PARAFAC2.PARAFAC2Error.invalidModes
+                    }
+                    let options = PARAFAC2.Options(rank: options0.rank, nStarts: options0.nStarts, seed: options0.seed)
+                    let result = try await PARAFAC2.decompose(
+                        a.tensor, modeNames: a.modeNames, varyingMode: varyingMode,
+                        sliceMode: subjectMode, options: options, report: report)
+                    let varyingType = a.modeTypes[varyingMode]
+                    let times = varyingType == .time ? a.timesMS : []
+                    let freqs = varyingType == .frequency ? a.freqs : []
+                    outcome = .success((result, .nan, [varyingType, .feature, .subject], freqs, times))
+                }
             } catch { outcome = .failure(error) }
             await MainActor.run {
                 cpRunning = false
                 switch outcome {
                 case .success(let (result, cc, types, freqs, times)):
-                    cpResult = result; cpCoreConsistency = cc
+                    cpResult = result; cpCoreConsistency = cc.isNaN ? nil : cc
                     cpModeTypes = types; cpFreqs = freqs; cpTimesMS = times
                 case .failure(let error):
                     cpResult = nil; cpCoreConsistency = nil
-                    cpError = (error as? LocalizedError)?.errorDescription ?? "PARAFAC failed: \(error)"
+                    cpError = (error as? LocalizedError)?.errorDescription ?? "Tensor model failed: \(error)"
                 }
             }
         }
@@ -611,7 +656,7 @@ struct TensorView: View {
             let outcome: Result<[MultiwayDiagnostics.RankPoint], Error>
             do {
                 let a = Self.assemble(source: src, input: input, timeIndices: timeIndices, preprocessing: pre, tfParams: tfP, poolConditions: pool)
-                outcome = .success(try MultiwayDiagnostics.rankSweep(
+                outcome = .success(try await MultiwayDiagnostics.rankSweep(
                     a.tensor, modeNames: a.modeNames, maxRank: maxRank, nonnegative: a.nonnegative, report: report))
             } catch { outcome = .failure(error) }
             await MainActor.run {
@@ -636,7 +681,7 @@ struct TensorView: View {
             do {
                 let a = Self.assemble(source: src, input: input, timeIndices: timeIndices, preprocessing: pre, tfParams: tfP, poolConditions: pool)
                 let subjectMode = a.modeTypes.firstIndex(of: .subject) ?? (a.tensor.order - 1)
-                outcome = .success(try MultiwayDiagnostics.splitHalfReliability(
+                outcome = .success(try await MultiwayDiagnostics.splitHalfReliability(
                     a.tensor, subjectMode: subjectMode, modeNames: a.modeNames, rank: r, nonnegative: a.nonnegative))
             } catch { outcome = .failure(error) }
             await MainActor.run {
@@ -667,6 +712,15 @@ struct TensorView: View {
         return (trimmed.isEmpty ? "tensor" : trimmed).replacingOccurrences(of: " ", with: "_")
             .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-")).inverted)
             .joined()
+    }
+
+    private func clearModelResult() {
+        cpResult = nil
+        cpCoreConsistency = nil
+        cpError = nil
+        cpModeTypes = []
+        cpFreqs = []
+        cpTimesMS = []
     }
 }
 

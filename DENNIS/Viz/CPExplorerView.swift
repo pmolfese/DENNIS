@@ -30,7 +30,17 @@ struct CPExplorerView: View {
     private var middleModes: [Int] {
         modeTypes.indices.filter { modeTypes[$0] != .channel && modeTypes[$0] != .subject }
     }
-    private var groupingOptions: [String] { ["Subject"] + factorNames }
+    private var groupingOptions: [String] {
+        var options = ["Subject"] + factorNames
+        if factorNames.count > 1 {
+            for i in 0..<(factorNames.count - 1) {
+                for j in (i + 1)..<factorNames.count {
+                    options.append(interactionName(factorNames[i], factorNames[j]))
+                }
+            }
+        }
+        return options
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -48,7 +58,7 @@ struct CPExplorerView: View {
                 Picker("Group subjects by", selection: $groupBy) {
                     ForEach(groupingOptions, id: \.self) { Text($0).tag($0) }
                 }
-                .pickerStyle(.segmented).fixedSize()
+                .pickerStyle(.menu).fixedSize()
             }
             ForEach(0..<result.rank, id: \.self) { card($0) }
         }
@@ -112,6 +122,18 @@ struct CPExplorerView: View {
                 }
                 .frame(height: 90)
             }
+        case .feature:
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Feature loadings").font(.caption2).foregroundStyle(.secondary)
+                Chart(column.enumerated().map {
+                    NamedLoad(name: "f\($0.offset + 1)", value: $0.element)
+                }) { item in
+                    BarMark(x: .value("Feature", item.name), y: .value("Loading", item.value))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .frame(height: 90)
+                .chartXAxis(.hidden)
+            }
         case .channel, .subject:
             EmptyView()
         }
@@ -153,7 +175,7 @@ struct CPExplorerView: View {
                 .chartXAxisLabel("Subject")
                 .frame(height: 80)
             } else {
-                Chart(groupStats(column, factor: groupBy)) { stat in
+                Chart(groupStats(column, grouping: groupBy)) { stat in
                     BarMark(x: .value("Group", stat.level), y: .value("Mean loading", stat.mean))
                         .foregroundStyle(Color.accentColor)
                     RuleMark(x: .value("Group", stat.level),
@@ -167,13 +189,13 @@ struct CPExplorerView: View {
         }
     }
 
-    private func groupStats(_ column: [Double], factor: String) -> [GroupStat] {
-        guard let factorIndex = factorNames.firstIndex(of: factor) else { return [] }
+    private func groupStats(_ column: [Double], grouping: String) -> [GroupStat] {
+        let factorIndices = indices(for: grouping)
+        guard !factorIndices.isEmpty else { return [] }
         var order: [String] = []
         var buckets: [String: [Double]] = [:]
         for (i, value) in column.enumerated() {
-            let level = (i < subjectLevels.count && factorIndex < subjectLevels[i].count
-                         && !subjectLevels[i][factorIndex].isEmpty) ? subjectLevels[i][factorIndex] : "Unassigned"
+            let level = groupLevel(subject: i, factorIndices: factorIndices)
             if buckets[level] == nil { order.append(level) }
             buckets[level, default: []].append(value)
         }
@@ -186,5 +208,28 @@ struct CPExplorerView: View {
                 : 0
             return GroupStat(level: level, mean: mean, se: se, n: n)
         }
+    }
+
+    private func indices(for grouping: String) -> [Int] {
+        if let index = factorNames.firstIndex(of: grouping) { return [index] }
+        let parts = grouping.components(separatedBy: " × ")
+        guard parts.count == 2 else { return [] }
+        return parts.compactMap { factorNames.firstIndex(of: $0) }
+    }
+
+    private func groupLevel(subject: Int, factorIndices: [Int]) -> String {
+        factorIndices.map { factorIndex in
+            if subject < subjectLevels.count,
+               factorIndex < subjectLevels[subject].count,
+               !subjectLevels[subject][factorIndex].isEmpty {
+                return subjectLevels[subject][factorIndex]
+            }
+            return "Unassigned"
+        }
+        .joined(separator: " × ")
+    }
+
+    private func interactionName(_ a: String, _ b: String) -> String {
+        "\(a) × \(b)"
     }
 }

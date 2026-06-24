@@ -25,12 +25,13 @@ struct RankSweepView: View {
                     .symbolSize(28)
             }
             ForEach(points) { point in
+                let cc = displayCoreConsistency(point.coreConsistency)
                 LineMark(x: .value("Rank", point.rank),
-                         y: .value("Core consistency %", max(point.coreConsistency, -20)),
+                         y: .value("Core consistency %", cc),
                          series: .value("Series", "Core consistency %"))
                     .foregroundStyle(by: .value("Series", "Core consistency %"))
                 PointMark(x: .value("Rank", point.rank),
-                          y: .value("Core consistency %", max(point.coreConsistency, -20)))
+                          y: .value("Core consistency %", cc))
                     .foregroundStyle(by: .value("Series", "Core consistency %"))
                     .symbolSize(28)
             }
@@ -42,7 +43,21 @@ struct RankSweepView: View {
             "Fit %": Color.accentColor,
             "Core consistency %": Color.orange,
         ])
+        .chartYAxis {
+            AxisMarks { value in
+                AxisGridLine()
+                AxisTick()
+                if let y = value.as(Double.self) {
+                    AxisValueLabel("\(Int(y.rounded()))%")
+                }
+            }
+        }
         .chartXAxisLabel("Rank (components)")
         .frame(minHeight: 220)
+    }
+
+    private func displayCoreConsistency(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, -20), 100)
     }
 }

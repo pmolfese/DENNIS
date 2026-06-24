@@ -42,14 +42,14 @@ struct PARAFACTests {
         (0..<rows).map { _ in (0..<rank).map { _ in rng.nextGaussian() } }
     }
 
-    @Test func recoversRankTwoThreeWayTensor() throws {
+    @Test func recoversRankTwoThreeWayTensor() async throws {
         var rng = SplitMix64(seed: 42)
         let dims = [5, 4, 6]
         let rank = 2
         let factors = dims.map { randomFactor(rows: $0, rank: rank, rng: &rng) }
         let tensor = buildTensor(dims: dims, factors: factors, rank: rank)
 
-        let result = try PARAFAC.decompose(
+        let result = try await PARAFAC.decompose(
             tensor, modeNames: ["A", "B", "C"],
             options: .init(rank: rank, maxIter: 500, tol: 1e-10, nStarts: 8, seed: 0))
 
@@ -61,14 +61,14 @@ struct PARAFACTests {
         #expect(abs(result.componentShare.reduce(0, +) - 1) < 1e-9)
     }
 
-    @Test func runsFourWayDecomposition() throws {
+    @Test func runsFourWayDecomposition() async throws {
         var rng = SplitMix64(seed: 7)
         let dims = [6, 5, 3, 4]                          // channels × time × cond × subject
         let rank = 3
         let factors = dims.map { randomFactor(rows: $0, rank: rank, rng: &rng) }
         let tensor = buildTensor(dims: dims, factors: factors, rank: rank)
 
-        let result = try PARAFAC.decompose(
+        let result = try await PARAFAC.decompose(
             tensor, modeNames: MultiwayTensor.erp4WayModeNames,
             options: .init(rank: rank, maxIter: 800, tol: 1e-11, nStarts: 10, seed: 0))
 
@@ -77,24 +77,24 @@ struct PARAFACTests {
         #expect(result.maxCongruence < 0.999)           // not degenerate
     }
 
-    @Test func coreConsistencyHighAtTrueRankLowWhenOverfit() throws {
+    @Test func coreConsistencyHighAtTrueRankLowWhenOverfit() async throws {
         var rng = SplitMix64(seed: 3)
         let dims = [6, 5, 4]
         let factors = dims.map { randomFactor(rows: $0, rank: 2, rng: &rng) }
         let tensor = buildTensor(dims: dims, factors: factors, rank: 2)
 
-        let atTrue = try PARAFAC.decompose(tensor, modeNames: ["A", "B", "C"],
-                                           options: .init(rank: 2, nStarts: 8, seed: 0))
+        let atTrue = try await PARAFAC.decompose(tensor, modeNames: ["A", "B", "C"],
+                                                 options: .init(rank: 2, nStarts: 8, seed: 0))
         let ccTrue = MultiwayDiagnostics.coreConsistency(tensor: tensor, result: atTrue)
         #expect(ccTrue > 90)                       // genuinely rank-2
 
-        let overfit = try PARAFAC.decompose(tensor, modeNames: ["A", "B", "C"],
-                                            options: .init(rank: 4, nStarts: 8, seed: 0))
+        let overfit = try await PARAFAC.decompose(tensor, modeNames: ["A", "B", "C"],
+                                                  options: .init(rank: 4, nStarts: 8, seed: 0))
         let ccOver = MultiwayDiagnostics.coreConsistency(tensor: tensor, result: overfit)
         #expect(ccOver < ccTrue)                   // over-rank degrades core consistency
     }
 
-    @Test func nonnegativeRecoversNonnegativeTensor() throws {
+    @Test func nonnegativeRecoversNonnegativeTensor() async throws {
         var rng = SplitMix64(seed: 11)
         let dims = [5, 4, 6]
         // Nonnegative factors → nonnegative tensor.
@@ -103,7 +103,7 @@ struct PARAFACTests {
         }
         let tensor = buildTensor(dims: dims, factors: factors, rank: 2)
 
-        let result = try PARAFAC.decompose(
+        let result = try await PARAFAC.decompose(
             tensor, modeNames: ["A", "B", "C"],
             options: .init(rank: 2, maxIter: 1000, tol: 1e-11, nStarts: 8, seed: 0, nonnegative: true))
 
@@ -113,10 +113,15 @@ struct PARAFACTests {
         }
     }
 
-    @Test func emptyTensorThrows() {
+    @Test func emptyTensorThrows() async {
         let zero = MultiwayTensor(dims: [3, 3, 3], data: [Double](repeating: 0, count: 27))
-        #expect(throws: PARAFAC.PARAFACError.self) {
-            _ = try PARAFAC.decompose(zero, modeNames: ["A", "B", "C"], options: .init(rank: 2))
+        do {
+            _ = try await PARAFAC.decompose(zero, modeNames: ["A", "B", "C"], options: .init(rank: 2))
+            Issue.record("Expected empty tensor to throw")
+        } catch is PARAFAC.PARAFACError {
+            // Expected.
+        } catch {
+            Issue.record("Expected PARAFACError, got \(error)")
         }
     }
 }
