@@ -184,6 +184,10 @@ private struct GroupDetail: View {
                 temporalPCASection
                 Divider()
                 dualPCASection
+                if dualModel != nil, let bundle = analysis.dual, bundle.groupID == groupID {
+                    Divider()
+                    PCAExportView(bundle: bundle)
+                }
             }
             .padding()
         }
