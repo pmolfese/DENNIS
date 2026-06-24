@@ -38,6 +38,7 @@ struct ClusterERPView: View {
     let factorNames: [String]
     let baselineSamples: Int
     let samplingRate: Double
+    var sensorLayout: SensorLayout? = nil
 
     @Environment(AnalysisStore.self) private var store
 
@@ -48,6 +49,7 @@ struct ClusterERPView: View {
     @State private var posTraces: [OverlayTrace] = []
     @State private var negTraces: [OverlayTrace] = []
     @State private var cellOrder: [String] = []
+    @State private var hidePNGReadout = false
 
     /// Grouping + visibility live in the store so they persist across the
     /// view rebuilds that happen when a different factor topography is clicked.
@@ -103,6 +105,18 @@ struct ClusterERPView: View {
                     set: { store.temporalThreshold = max(0, $0) }
                 ), format: .number.precision(.fractionLength(2)))
                     .textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
+            }
+            if let sensorLayout {
+                Toggle("Hide PNG readout", isOn: $hidePNGReadout)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                Button {
+                    savePNG(layout: sensorLayout)
+                } label: {
+                    Label("Save PNG", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
             }
         }
     }
@@ -309,5 +323,144 @@ struct ClusterERPView: View {
         }
         let inv = Float(1) / Float(valid.count)
         return out.map { $0 * inv }
+    }
+
+    private func savePNG(layout: SensorLayout) {
+        let visiblePos = posTraces.filter { isVisible($0.id) }
+        let visibleNeg = negTraces.filter { isVisible($0.id) }
+        ImageExport.savePNG(
+            ClusterERPExportView(
+                factor: factor,
+                layout: layout,
+                spatialLoading: spatialLoading,
+                threshold: threshold,
+                positiveChannels: positiveChannels,
+                negativeChannels: negativeChannels,
+                positiveTraces: visiblePos,
+                negativeTraces: visibleNeg,
+                samplingRate: samplingRate,
+                baselineSamples: baselineSamples,
+                showsStandardError: store.showStandardError,
+                shadedRanges: shadedRanges,
+                showsCursorReadout: !hidePNGReadout
+            ),
+            suggestedName: "cluster_erp_\(safe(factor.name))"
+        )
+    }
+
+    private func safe(_ text: String) -> String {
+        text
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-")).inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "_")
+    }
+}
+
+private struct ClusterERPExportView: View {
+    let factor: TwoStepFactor
+    let layout: SensorLayout
+    let spatialLoading: [Double]
+    let threshold: Double
+    let positiveChannels: [Int]
+    let negativeChannels: [Int]
+    let positiveTraces: [OverlayTrace]
+    let negativeTraces: [OverlayTrace]
+    let samplingRate: Double
+    let baselineSamples: Int
+    let showsStandardError: Bool
+    let shadedRanges: [ClosedRange<Double>]
+    let showsCursorReadout: Bool
+    private let legendColumns = [GridItem(.adaptive(minimum: 150, maximum: 230), alignment: .leading)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Cluster ERP · \(factor.name)")
+                        .font(.headline)
+                    Text(String(format: "Spatial threshold |loading| ≥ %.2f", threshold))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(String(format: "%.1f%% variance", factor.variance * 100))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Spatial factor topomap")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    TopomapView(
+                        layout: layout,
+                        values: spatialLoading,
+                        timeSeconds: 0,
+                        fixedScale: nil,
+                        showsHeader: false,
+                        usesVerticalColorBar: true,
+                        canvasMinHeight: 260,
+                        highlightThreshold: threshold > 0 ? threshold : nil
+                    )
+                    .frame(width: 330, height: 330)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    exportClusterPlot(title: "Positive cluster", channels: positiveChannels,
+                                      sign: "+", traces: positiveTraces)
+                    exportClusterPlot(title: "Negative cluster", channels: negativeChannels,
+                                      sign: "-", traces: negativeTraces)
+                }
+                .frame(width: 700)
+            }
+        }
+        .frame(width: 1080, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func exportClusterPlot(title: String, channels: [Int], sign: String,
+                                   traces: [OverlayTrace]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\(title) · \(channels.count) ch \(sign)\(String(format: "%.2f", threshold))")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if channels.isEmpty {
+                Text("No channels in this cluster at the current threshold.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .frame(height: 210, alignment: .center)
+            } else if traces.isEmpty {
+                Text("No visible groups selected.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .frame(height: 210, alignment: .center)
+            } else {
+                exportLegend(traces)
+                OverlayWaveformView(
+                    traces: traces,
+                    samplingRate: samplingRate,
+                    baselineSamples: baselineSamples,
+                    showsCentroid: true,
+                    cursorSample: .constant(baselineSamples),
+                    showsStandardError: showsStandardError,
+                    shadedMSRanges: shadedRanges,
+                    showsCursorReadout: showsCursorReadout,
+                    showsLegend: false
+                )
+                .frame(height: 190)
+            }
+        }
+    }
+
+    private func exportLegend(_ traces: [OverlayTrace]) -> some View {
+        LazyVGrid(columns: legendColumns, alignment: .leading, spacing: 6) {
+            ForEach(traces) { trace in
+                HStack(spacing: 6) {
+                    Capsule().fill(trace.color).frame(width: 18, height: 4)
+                    Text(trace.label)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Text("n=\(trace.contributing)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }

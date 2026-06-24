@@ -98,7 +98,8 @@ struct DualPCAView: View {
                             conditionNames: clusterConditionNames,
                             factorNames: clusterFactorNames,
                             baselineSamples: clusterBaseline,
-                            samplingRate: clusterSamplingRate
+                            samplingRate: clusterSamplingRate,
+                            sensorLayout: layout
                         )
                         .id(factor.name)
                     }
