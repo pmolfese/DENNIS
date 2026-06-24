@@ -123,6 +123,28 @@ nonisolated func crossProduct(_ m: Matrix) -> Matrix {
     return result
 }
 
+/// `m · mᵀ` (rows × rows) via a symmetric rank-k update (BLAS dsyrk). Used to
+/// get a tensor mode's singular spectrum from the small mode×mode Gram rather
+/// than a full SVD of the wide unfolding.
+nonisolated func gramRows(_ m: Matrix) -> Matrix {
+    let rows = m.rows, cols = m.cols
+    var result = Matrix(rows: rows, cols: rows)
+    m.grid.withUnsafeBufferPointer { a in
+        result.grid.withUnsafeMutableBufferPointer { c in
+            cblas_dsyrk(
+                CblasColMajor, CblasUpper, CblasNoTrans,
+                Int32(rows), Int32(cols),
+                1.0, a.baseAddress, Int32(rows),
+                0.0, c.baseAddress, Int32(rows)
+            )
+        }
+    }
+    for i in 0..<rows {
+        for j in (i + 1)..<rows { result[j, i] = result[i, j] }
+    }
+    return result
+}
+
 nonisolated func selectColumns(_ m: Matrix, _ indices: [Int]) -> Matrix {
     var out = Matrix(rows: m.rows, cols: indices.count)
     for (newC, oldC) in indices.enumerated() {

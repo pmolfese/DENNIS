@@ -46,11 +46,15 @@ struct DetailView: View {
         case .pca:
             selectionContent
         case .tensor:
-            ContentUnavailableView(
-                "Tensor Mode",
-                systemImage: "cube.transparent",
-                description: Text("Tensor-based analysis is coming soon.")
-            )
+            if case .group(let id) = selection {
+                TensorView(groupID: id).id(id)
+            } else {
+                ContentUnavailableView(
+                    "Tensor Mode",
+                    systemImage: "cube.transparent",
+                    description: Text("Select a group in the sidebar to run a 4-way PARAFAC analysis.")
+                )
+            }
         case .pls:
             ContentUnavailableView(
                 "PLS Mode",
