@@ -18,7 +18,7 @@
 import SwiftUI
 
 /// One subject's per-condition ERP plus its between-subject factor levels.
-struct ClusterSubject: Identifiable {
+nonisolated struct ClusterSubject: Identifiable, Sendable {
     let name: String
     /// Between-subject factor levels, index-aligned with the study's factors.
     let levels: [String]
@@ -50,6 +50,9 @@ struct ClusterERPView: View {
     @State private var negTraces: [OverlayTrace] = []
     @State private var cellOrder: [String] = []
     @State private var hidePNGReadout = false
+    @State private var tracesRebuilding = false
+    @State private var rebuildGeneration = 0
+    @State private var rebuildTask: Task<Void, Never>?
 
     /// Grouping + visibility live in the store so they persist across the
     /// view rebuilds that happen when a different factor topography is clicked.
@@ -80,6 +83,10 @@ struct ClusterERPView: View {
         .onAppear { rebuild(resetVisibility: false) }
         .onChange(of: store.clusterGroupBy) { _, _ in rebuild(resetVisibility: true) }
         .onChange(of: store.spatialThreshold) { _, _ in rebuild(resetVisibility: false) }
+        .onDisappear {
+            rebuildTask?.cancel()
+            rebuildTask = nil
+        }
     }
 
     // MARK: - Controls
@@ -178,6 +185,10 @@ struct ClusterERPView: View {
             if channels.isEmpty {
                 Text("No channels in this cluster at the current threshold.")
                     .font(.caption).foregroundStyle(.tertiary)
+            } else if tracesRebuilding {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(minHeight: 200, alignment: .center)
             } else {
                 let visible = traces.filter { isVisible($0.id) }
                 if visible.isEmpty {
@@ -214,115 +225,49 @@ struct ClusterERPView: View {
 
     // MARK: - Cell construction
 
-    private struct Cell { let label: String; let subjects: [ClusterSubject]; let conditions: [String] }
-
-    private func levelOf(_ subject: ClusterSubject, _ factorName: String) -> String {
-        guard let idx = factorNames.firstIndex(of: factorName), idx < subject.levels.count else { return "?" }
-        let value = subject.levels[idx]
-        return value.isEmpty ? "Unassigned" : value
-    }
-
-    /// Build the trace cells from the current "Group by" selection.
-    private func cells() -> [Cell] {
-        let orderedBetween = factorNames.filter { groupBy.contains($0) }
-        let useCondition = groupBy.contains(Self.conditionDimension)
-
-        var keys: [String] = []
-        var byKey: [String: [ClusterSubject]] = [:]
-        for subject in subjects {
-            let key = orderedBetween.map { levelOf(subject, $0) }.joined(separator: "·")
-            if byKey[key] == nil { keys.append(key) }
-            byKey[key, default: []].append(subject)
-        }
-
-        var result: [Cell] = []
-        for key in keys {
-            let subs = byKey[key] ?? []
-            if useCondition {
-                for condition in conditionNames {
-                    let label = key.isEmpty ? condition : "\(key)·\(condition)"
-                    result.append(Cell(label: label, subjects: subs, conditions: [condition]))
-                }
-            } else {
-                result.append(Cell(label: key.isEmpty ? "Overall" : key,
-                                    subjects: subs, conditions: conditionNames))
-            }
-        }
-        return result
-    }
-
     private func rebuild(resetVisibility: Bool) {
-        let built = cells()
-        cellOrder = built.map(\.label)
-        posTraces = built.enumerated().compactMap { makeTrace($0.element, index: $0.offset, channels: positiveChannels) }
-        negTraces = built.enumerated().compactMap { makeTrace($0.element, index: $0.offset, channels: negativeChannels) }
+        let generation = rebuildGeneration + 1
+        rebuildGeneration = generation
+        tracesRebuilding = true
         if resetVisibility {
             store.clusterVisibleCells = nil   // nil = all cells shown
         }
-    }
 
-    private func makeTrace(_ cell: Cell, index: Int, channels: [Int]) -> OverlayTrace? {
-        guard let stats = cellStats(cell: cell, channels: channels) else { return nil }
-        return OverlayTrace(
-            id: cell.label, label: cell.label,
-            color: OverlayWaveformView.palette[index % OverlayWaveformView.palette.count],
-            samples: [], centroid: stats.mean, contributing: stats.n, sensorLayout: nil,
-            centroidSE: stats.se
+        let input = ClusterERPTraceBuilder.Input(
+            groupBy: groupBy,
+            conditionDimension: Self.conditionDimension,
+            factorNames: factorNames,
+            subjects: subjects,
+            conditionNames: conditionNames,
+            positiveChannels: positiveChannels,
+            negativeChannels: negativeChannels
         )
-    }
 
-    /// Mean and ±1 standard-error (across subjects) of the cluster-mean waveform.
-    /// Each subject contributes one waveform (averaged over the cell's conditions),
-    /// so the SE reflects between-subject variability — the standard ERP measure.
-    private func cellStats(cell: Cell, channels: [Int]) -> (mean: [Float], se: [Float], n: Int)? {
-        var subjectWaves: [[Float]] = []
-        for subject in cell.subjects {
-            var sum: [Float] = []
-            var k = 0
-            for condition in cell.conditions {
-                guard let samples = subject.byCondition[condition] else { continue }
-                let mean = clusterMean(samples, channels: channels)
-                guard !mean.isEmpty else { continue }
-                if sum.isEmpty { sum = [Float](repeating: 0, count: mean.count) }
-                guard sum.count == mean.count else { continue }
-                for i in 0..<mean.count { sum[i] += mean[i] }
-                k += 1
-            }
-            if k > 0 { subjectWaves.append(sum.map { $0 / Float(k) }) }
-        }
-        guard let t = subjectWaves.first?.count else { return nil }
-        let waves = subjectWaves.filter { $0.count == t }
-        let n = waves.count
-        guard n > 0 else { return nil }
-
-        var mean = [Float](repeating: 0, count: t)
-        for wave in waves { for i in 0..<t { mean[i] += wave[i] } }
-        for i in 0..<t { mean[i] /= Float(n) }
-
-        var se = [Float](repeating: 0, count: t)
-        if n > 1 {
-            for i in 0..<t {
-                var ss = 0.0
-                for wave in waves { let d = Double(wave[i] - mean[i]); ss += d * d }
-                se[i] = Float((ss / Double(n - 1)).squareRoot() / Double(n).squareRoot())
+        rebuildTask?.cancel()
+        rebuildTask = Task.detached(priority: .userInitiated) {
+            let result = ClusterERPTraceBuilder.build(input)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard generation == rebuildGeneration else { return }
+                cellOrder = result.cellOrder
+                posTraces = result.positive.map(overlayTrace)
+                negTraces = result.negative.map(overlayTrace)
+                tracesRebuilding = false
             }
         }
-        return (mean, se, n)
     }
 
-    /// Mean across the given channel indices at each time point.
-    private func clusterMean(_ samples: [[Float]], channels: [Int]) -> [Float] {
-        let valid = channels.filter { $0 < samples.count }
-        guard let first = valid.first else { return [] }
-        let n = samples[first].count
-        var out = [Float](repeating: 0, count: n)
-        for ch in valid {
-            let trace = samples[ch]
-            guard trace.count == n else { continue }
-            for i in 0..<n { out[i] += trace[i] }
-        }
-        let inv = Float(1) / Float(valid.count)
-        return out.map { $0 * inv }
+    private func overlayTrace(_ trace: ClusterERPTraceBuilder.TraceData) -> OverlayTrace {
+        OverlayTrace(
+            id: trace.label,
+            label: trace.label,
+            color: OverlayWaveformView.palette[trace.colorIndex % OverlayWaveformView.palette.count],
+            samples: [],
+            centroid: trace.mean,
+            contributing: trace.n,
+            sensorLayout: nil,
+            centroidSE: trace.se
+        )
     }
 
     private func savePNG(layout: SensorLayout) {
@@ -353,6 +298,150 @@ struct ClusterERPView: View {
             .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-")).inverted)
             .filter { !$0.isEmpty }
             .joined(separator: "_")
+    }
+}
+
+private nonisolated enum ClusterERPTraceBuilder {
+    struct Input: Sendable {
+        let groupBy: Set<String>
+        let conditionDimension: String
+        let factorNames: [String]
+        let subjects: [ClusterSubject]
+        let conditionNames: [String]
+        let positiveChannels: [Int]
+        let negativeChannels: [Int]
+    }
+
+    struct TraceData: Sendable {
+        let label: String
+        let colorIndex: Int
+        let mean: [Float]
+        let se: [Float]
+        let n: Int
+    }
+
+    struct Result: Sendable {
+        let cellOrder: [String]
+        let positive: [TraceData]
+        let negative: [TraceData]
+    }
+
+    private struct Cell: Sendable {
+        let label: String
+        let subjects: [ClusterSubject]
+        let conditions: [String]
+    }
+
+    static func build(_ input: Input) -> Result {
+        let built = cells(input)
+        return Result(
+            cellOrder: built.map(\.label),
+            positive: built.enumerated().compactMap {
+                makeTrace($0.element, index: $0.offset, channels: input.positiveChannels)
+            },
+            negative: built.enumerated().compactMap {
+                makeTrace($0.element, index: $0.offset, channels: input.negativeChannels)
+            }
+        )
+    }
+
+    /// Build the trace cells from the current "Group by" selection.
+    private static func cells(_ input: Input) -> [Cell] {
+        let orderedBetween = input.factorNames.filter { input.groupBy.contains($0) }
+        let useCondition = input.groupBy.contains(input.conditionDimension)
+
+        var keys: [String] = []
+        var byKey: [String: [ClusterSubject]] = [:]
+        for subject in input.subjects {
+            let key = orderedBetween.map { levelOf(subject, $0, factorNames: input.factorNames) }
+                .joined(separator: "·")
+            if byKey[key] == nil { keys.append(key) }
+            byKey[key, default: []].append(subject)
+        }
+
+        var result: [Cell] = []
+        for key in keys {
+            let subs = byKey[key] ?? []
+            if useCondition {
+                for condition in input.conditionNames {
+                    let label = key.isEmpty ? condition : "\(key)·\(condition)"
+                    result.append(Cell(label: label, subjects: subs, conditions: [condition]))
+                }
+            } else {
+                result.append(Cell(label: key.isEmpty ? "Overall" : key,
+                                   subjects: subs, conditions: input.conditionNames))
+            }
+        }
+        return result
+    }
+
+    private static func levelOf(_ subject: ClusterSubject, _ factorName: String,
+                                factorNames: [String]) -> String {
+        guard let idx = factorNames.firstIndex(of: factorName), idx < subject.levels.count else { return "?" }
+        let value = subject.levels[idx]
+        return value.isEmpty ? "Unassigned" : value
+    }
+
+    private static func makeTrace(_ cell: Cell, index: Int, channels: [Int]) -> TraceData? {
+        guard let stats = cellStats(cell: cell, channels: channels) else { return nil }
+        return TraceData(label: cell.label, colorIndex: index, mean: stats.mean, se: stats.se, n: stats.n)
+    }
+
+    /// Mean and +/-1 standard-error (across subjects) of the cluster-mean waveform.
+    /// Each subject contributes one waveform (averaged over the cell's conditions),
+    /// so the SE reflects between-subject variability.
+    private static func cellStats(cell: Cell, channels: [Int]) -> (mean: [Float], se: [Float], n: Int)? {
+        var subjectWaves: [[Float]] = []
+        for subject in cell.subjects {
+            var sum: [Float] = []
+            var k = 0
+            for condition in cell.conditions {
+                guard let samples = subject.byCondition[condition] else { continue }
+                let mean = clusterMean(samples, channels: channels)
+                guard !mean.isEmpty else { continue }
+                if sum.isEmpty { sum = [Float](repeating: 0, count: mean.count) }
+                guard sum.count == mean.count else { continue }
+                for i in 0..<mean.count { sum[i] += mean[i] }
+                k += 1
+            }
+            if k > 0 { subjectWaves.append(sum.map { $0 / Float(k) }) }
+        }
+        guard let t = subjectWaves.first?.count else { return nil }
+        let waves = subjectWaves.filter { $0.count == t }
+        let n = waves.count
+        guard n > 0 else { return nil }
+
+        var mean = [Float](repeating: 0, count: t)
+        for wave in waves { for i in 0..<t { mean[i] += wave[i] } }
+        for i in 0..<t { mean[i] /= Float(n) }
+
+        var se = [Float](repeating: 0, count: t)
+        if n > 1 {
+            for i in 0..<t {
+                var ss = 0.0
+                for wave in waves {
+                    let d = Double(wave[i] - mean[i])
+                    ss += d * d
+                }
+                se[i] = Float((ss / Double(n - 1)).squareRoot() / Double(n).squareRoot())
+            }
+        }
+        return (mean, se, n)
+    }
+
+    /// Mean across the given channel indices at each time point.
+    private static func clusterMean(_ samples: [[Float]], channels: [Int]) -> [Float] {
+        let valid = channels.filter { $0 < samples.count }
+        guard let first = valid.first else { return [] }
+        let n = samples[first].count
+        var out = [Float](repeating: 0, count: n)
+        for ch in valid {
+            let trace = samples[ch]
+            guard trace.count == n else { continue }
+            for i in 0..<n { out[i] += trace[i] }
+        }
+        let inv = Float(1) / Float(valid.count)
+        return out.map { $0 * inv }
     }
 }
 

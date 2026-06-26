@@ -128,8 +128,22 @@ private struct GroupDetail: View {
         var id: String { rawValue }
     }
 
+    private struct GrandAverageOverlayData {
+        let traces: [OverlayTrace]
+        let baseline: Int
+        let samplingRate: Double
+        let combinedTopomap: OverlayTrace?
+    }
+
+    private enum GrandAverageDisplay {
+        case single(condition: String, average: GrandAverage)
+        case overlay(caption: String, data: GrandAverageOverlayData)
+        case unavailable(String)
+    }
+
     @State private var selectedCondition: String?
     @State private var showPlot = false
+    @State private var grandAverageDisplay: GrandAverageDisplay?
     @State private var overlayMode: OverlayMode = .single
     @State private var showOverlayCentroid = false
     @State private var compareTopomaps = false
@@ -266,8 +280,7 @@ private struct GroupDetail: View {
                 Spacer()
                 if !showPlot {
                     Button {
-                        if selectedCondition == nil { selectedCondition = conditionNames.first }
-                        showPlot = true
+                        plotGrandAverage()
                     } label: {
                         Label("Plot Grand Average", systemImage: "waveform.path.ecg")
                     }
@@ -288,7 +301,11 @@ private struct GroupDetail: View {
                     Text("Conditions").tag(OverlayMode.conditions)
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: overlayMode) { _, _ in cursorSample = 0 }
+                .onChange(of: overlayMode) { _, _ in
+                    cursorSample = 0
+                    topomapSample = 0
+                    rebuildGrandAverageDisplay()
+                }
 
                 // The condition picker is only relevant when not overlaying conditions.
                 if overlayMode != .conditions {
@@ -296,11 +313,24 @@ private struct GroupDetail: View {
                         ForEach(conditionNames, id: \.self) { Text($0).tag(Optional($0)) }
                     }
                     .pickerStyle(.segmented)
-                    .onChange(of: selectedCondition) { _, _ in cursorSample = 0 }
+                    .onChange(of: selectedCondition) { _, _ in
+                        cursorSample = 0
+                        topomapSample = 0
+                        rebuildGrandAverageDisplay()
+                    }
                 }
 
-                content
+                grandAverageContent
             }
+        }
+        .onChange(of: loadedCount) { _, _ in
+            if showPlot { rebuildGrandAverageDisplay() }
+        }
+        .onChange(of: conditionNames) { _, names in
+            if let selectedCondition, !names.contains(selectedCondition) {
+                self.selectedCondition = names.first
+            }
+            if showPlot { rebuildGrandAverageDisplay() }
         }
     }
 
@@ -452,7 +482,7 @@ private struct GroupDetail: View {
                 }
             }
             HStack {
-                Stepper("Factors: \(pcaFactors)", value: $pcaFactors, in: 1...20).fixedSize()
+                factorCountControl("Factors", value: $pcaFactors, range: 1...20)
                 Picker("Rotation", selection: $pcaRotation) {
                     Text("Promax").tag(PCARotation.promax)
                     Text("Varimax").tag(PCARotation.varimax)
@@ -535,9 +565,26 @@ private struct GroupDetail: View {
         }
     }
 
-    // MARK: - Temporal PCA
+    private func factorCountControl(_ label: String, value: Binding<Int>,
+                                    range: ClosedRange<Int>) -> some View {
+        let bounded = Binding<Int>(
+            get: { value.wrappedValue },
+            set: { value.wrappedValue = min(max($0, range.lowerBound), range.upperBound) }
+        )
+        return HStack(spacing: 6) {
+            Text(label)
+            TextField(label, value: bounded, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 48)
+                .multilineTextAlignment(.trailing)
+            Stepper("", value: bounded, in: range)
+                .labelsHidden()
+                .fixedSize()
+        }
+        .fixedSize()
+    }
 
-    @ViewBuilder
+    // MARK: - Temporal PCA
 
     private func runTemporalPCA() {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
@@ -598,8 +645,7 @@ private struct GroupDetail: View {
                            + "factors are chosen per temporal factor — run the spatial scree to estimate "
                            + "how many to retain.")
                 Spacer()
-                Stepper("Spatial factors: \(dualSpatialFactors)", value: $dualSpatialFactors, in: 1...20)
-                    .fixedSize()
+                factorCountControl("Spatial factors", value: $dualSpatialFactors, range: 1...20)
                 Picker("2nd rotation", selection: $dualSecondRotation) {
                     Text("Infomax").tag(PCARotation.infomax)
                     Text("Extended Infomax").tag(PCARotation.extendedInfomax)
@@ -798,27 +844,68 @@ private struct GroupDetail: View {
         }
     }
 
-    @ViewBuilder
-    private var content: some View {
+    private func plotGrandAverage() {
+        if selectedCondition == nil { selectedCondition = conditionNames.first }
+        showPlot = true
+        rebuildGrandAverageDisplay()
+    }
+
+    private func rebuildGrandAverageDisplay() {
+        guard showPlot else {
+            grandAverageDisplay = nil
+            return
+        }
+
         switch overlayMode {
         case .single:
-            if let name = selectedCondition,
-               let ga = GrandAverage.compute(datasets: members, condition: name) {
-                grandAveragePlot(ga, condition: name)
+            guard let name = selectedCondition ?? conditionNames.first else {
+                grandAverageDisplay = .unavailable("Select a condition to plot.")
+                return
+            }
+            if selectedCondition == nil { selectedCondition = name }
+            if let ga = GrandAverage.compute(datasets: members, condition: name) {
+                grandAverageDisplay = .single(condition: name, average: ga)
             } else {
-                unavailable("Couldn't compute a grand average for this condition.")
+                grandAverageDisplay = .unavailable("Couldn't compute a grand average for this condition.")
             }
+
         case .subgroups:
-            if children.isEmpty {
-                unavailable("This group has no sub-folders to compare. Select a parent folder, "
-                            + "or use “Conditions”.")
-            } else if let name = selectedCondition {
-                overlayPlot(traces: subgroupTraces(condition: name),
-                            caption: "\(name) · butterfly plot per sub-folder")
+            guard !children.isEmpty else {
+                grandAverageDisplay = .unavailable(
+                    "This group has no sub-folders to compare. Select a parent folder, or use “Conditions”.")
+                return
             }
+            guard let name = selectedCondition ?? conditionNames.first else {
+                grandAverageDisplay = .unavailable("Select a condition to plot.")
+                return
+            }
+            if selectedCondition == nil { selectedCondition = name }
+            let data = subgroupOverlayData(condition: name)
+            grandAverageDisplay = .overlay(
+                caption: "\(name) · butterfly plot per sub-folder",
+                data: data
+            )
+
         case .conditions:
-            overlayPlot(traces: conditionTraces(),
-                        caption: "Butterfly plot per condition · \(members.count) subjects")
+            let data = conditionOverlayData()
+            grandAverageDisplay = .overlay(
+                caption: "Butterfly plot per condition · \(members.count) subjects",
+                data: data
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var grandAverageContent: some View {
+        switch grandAverageDisplay {
+        case .single(let condition, let average):
+            grandAveragePlot(average, condition: condition)
+        case .overlay(let caption, let data):
+            overlayPlot(caption: caption, data: data)
+        case .unavailable(let text):
+            unavailable(text)
+        case nil:
+            unavailable("Plot a grand average to preview the signal.")
         }
     }
 
@@ -829,8 +916,8 @@ private struct GroupDetail: View {
     // MARK: - Overlay rendering
 
     @ViewBuilder
-    private func overlayPlot(traces: [OverlayTrace], caption: String) -> some View {
-        if traces.isEmpty {
+    private func overlayPlot(caption: String, data: GrandAverageOverlayData) -> some View {
+        if data.traces.isEmpty {
             unavailable("Not enough loaded data to plot this comparison yet.")
         } else {
             VStack(alignment: .leading, spacing: 8) {
@@ -845,16 +932,16 @@ private struct GroupDetail: View {
                 }
                 HStack(alignment: .top, spacing: 16) {
                     OverlayWaveformView(
-                        traces: traces,
-                        samplingRate: overlaySamplingRate,
-                        baselineSamples: overlayBaseline,
+                        traces: data.traces,
+                        samplingRate: data.samplingRate,
+                        baselineSamples: data.baseline,
                         showsCentroid: showOverlayCentroid,
-                        cursorSample: cursorBinding(max: traces.map(\.sampleCount).max() ?? 1)
+                        cursorSample: cursorBinding(max: data.traces.map(\.sampleCount).max() ?? 1)
                     )
                     .frame(minHeight: 320)
                     .frame(maxWidth: .infinity)
 
-                    overlayTopomaps(traces: traces)
+                    overlayTopomaps(data)
                         .frame(width: compareTopomaps ? 340 : 320)
                 }
             }
@@ -862,8 +949,8 @@ private struct GroupDetail: View {
     }
 
     @ViewBuilder
-    private func overlayTopomaps(traces: [OverlayTrace]) -> some View {
-        let mappable = traces.filter { $0.sensorLayout != nil }
+    private func overlayTopomaps(_ data: GrandAverageOverlayData) -> some View {
+        let mappable = data.traces.filter { $0.sensorLayout != nil }
         if mappable.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Topography").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -876,21 +963,22 @@ private struct GroupDetail: View {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         Text("Topography").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         ForEach(mappable) { trace in
-                            overlayTopomapCard(for: trace, scale: scale)
+                            overlayTopomapCard(for: trace, scale: scale, samplingRate: data.samplingRate)
                         }
                     }
                 }
-            } else if let combined = combinedTopomapTrace(from: mappable) {
+            } else if let combined = data.combinedTopomap {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Topography").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    overlayTopomapCard(for: combined, scale: scale)
+                    overlayTopomapCard(for: combined, scale: scale, samplingRate: data.samplingRate)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func overlayTopomapCard(for trace: OverlayTrace, scale: Double) -> some View {
+    private func overlayTopomapCard(for trace: OverlayTrace, scale: Double,
+                                    samplingRate: Double) -> some View {
         if let layout = trace.sensorLayout {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
@@ -900,7 +988,7 @@ private struct GroupDetail: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(String(format: "t = %.3f s", overlaySamplingRate > 0 ? Double(topomapSample) / overlaySamplingRate : 0))
+                    Text(String(format: "t = %.3f s", samplingRate > 0 ? Double(topomapSample) / samplingRate : 0))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -909,7 +997,7 @@ private struct GroupDetail: View {
                     values: trace.samples.map { channel in
                         topomapSample < channel.count ? Double(channel[topomapSample]) : 0
                     },
-                    timeSeconds: overlaySamplingRate > 0 ? Double(topomapSample) / overlaySamplingRate : 0,
+                    timeSeconds: samplingRate > 0 ? Double(topomapSample) / samplingRate : 0,
                     fixedScale: scale,
                     showsHeader: false,
                     interpolationStep: compareTopomaps ? 6 : 7,
@@ -991,9 +1079,17 @@ private struct GroupDetail: View {
     }
 
     /// One butterfly plot per immediate sub-folder, for a condition.
-    private func subgroupTraces(condition name: String) -> [OverlayTrace] {
-        children.enumerated().compactMap { index, child in
+    private func subgroupOverlayData(condition name: String) -> GrandAverageOverlayData {
+        var baseline = 0
+        var samplingRate = 0.0
+        var hasReference = false
+        let traces: [OverlayTrace] = children.enumerated().compactMap { index, child in
             guard let ga = GrandAverage.compute(datasets: child.datasets, condition: name) else { return nil }
+            if !hasReference {
+                baseline = ga.baselineSamples
+                samplingRate = ga.samplingRate
+                hasReference = true
+            }
             return OverlayTrace(
                 id: child.id, label: child.label,
                 color: OverlayWaveformView.palette[index % OverlayWaveformView.palette.count],
@@ -1003,12 +1099,21 @@ private struct GroupDetail: View {
                 sensorLayout: ga.sensorLayout
             )
         }
+        return overlayData(traces: traces, baseline: baseline, samplingRate: samplingRate)
     }
 
     /// One butterfly plot per condition, for this whole group.
-    private func conditionTraces() -> [OverlayTrace] {
-        conditionNames.enumerated().compactMap { index, name in
+    private func conditionOverlayData() -> GrandAverageOverlayData {
+        var baseline = 0
+        var samplingRate = 0.0
+        var hasReference = false
+        let traces: [OverlayTrace] = conditionNames.enumerated().compactMap { index, name in
             guard let ga = GrandAverage.compute(datasets: members, condition: name) else { return nil }
+            if !hasReference {
+                baseline = ga.baselineSamples
+                samplingRate = ga.samplingRate
+                hasReference = true
+            }
             return OverlayTrace(
                 id: name, label: name,
                 color: OverlayWaveformView.palette[index % OverlayWaveformView.palette.count],
@@ -1018,21 +1123,19 @@ private struct GroupDetail: View {
                 sensorLayout: ga.sensorLayout
             )
         }
+        return overlayData(traces: traces, baseline: baseline, samplingRate: samplingRate)
     }
 
-    /// Shared baseline/sfreq for overlays (taken from the first computable GA).
-    private var overlayReference: GrandAverage? {
-        switch overlayMode {
-        case .conditions:
-            return conditionNames.lazy.compactMap { GrandAverage.compute(datasets: members, condition: $0) }.first
-        default:
-            guard let name = selectedCondition else { return nil }
-            return children.lazy.compactMap { GrandAverage.compute(datasets: $0.datasets, condition: name) }.first
-                ?? GrandAverage.compute(datasets: members, condition: name)
-        }
+    private func overlayData(traces: [OverlayTrace], baseline: Int,
+                             samplingRate: Double) -> GrandAverageOverlayData {
+        let mappable = traces.filter { $0.sensorLayout != nil }
+        return GrandAverageOverlayData(
+            traces: traces,
+            baseline: baseline,
+            samplingRate: samplingRate,
+            combinedTopomap: combinedTopomapTrace(from: mappable)
+        )
     }
-    private var overlayBaseline: Int { overlayReference?.baselineSamples ?? 0 }
-    private var overlaySamplingRate: Double { overlayReference?.samplingRate ?? 0 }
 
     private func grandAveragePlot(_ ga: GrandAverage, condition name: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
