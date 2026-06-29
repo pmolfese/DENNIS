@@ -2,10 +2,10 @@
 //  CategoriesBar.swift
 //  DENNIS
 //
-//  A horizontal strip across the top of the window listing every condition
-//  (category) found across the loaded datasets — the union of the `<cat>`
-//  entries from each MFF's `categories.xml`. Each chip can be deleted, which
-//  removes that condition from every dataset in the study.
+//  A sidebar strip listing every condition (category) found across the loaded
+//  datasets — the union of the `<cat>` entries from each MFF's `categories.xml`.
+//  Each chip can be deleted, which removes that condition from every dataset in
+//  the study.
 //
 
 import SwiftUI

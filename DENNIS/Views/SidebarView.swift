@@ -21,12 +21,16 @@ struct SidebarView: View {
     @State private var isDropTargeted = false
 
     var body: some View {
-        Group {
-            if study.isEmpty {
-                emptyState
-            } else {
-                tree
+        VStack(spacing: 0) {
+            CategoriesBar(selection: $selection)
+            Group {
+                if study.isEmpty {
+                    emptyState
+                } else {
+                    tree
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .dropDestination(for: URL.self) { urls, _ in
             onDropURLs(urls)
