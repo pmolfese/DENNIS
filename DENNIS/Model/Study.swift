@@ -102,6 +102,18 @@ final class Study {
     var factors: [DesignFactor]
     var datasets: [Dataset]
 
+    @ObservationIgnored private var derivedRevision = 0
+    @ObservationIgnored private var conditionSummaryCache: (revision: Int, summary: ConditionSummary)?
+    @ObservationIgnored private var groupTreeCache: (revision: Int, tree: [GroupNode])?
+    @ObservationIgnored private var groupMembersCache: [String: (revision: Int, datasets: [Dataset])] = [:]
+    @ObservationIgnored private var childGroupsCache: [String: (revision: Int, groups: [ChildGroup])] = [:]
+    @ObservationIgnored private var sharedConditionsCache: [String: (revision: Int, names: [String])] = [:]
+
+    private struct ConditionSummary {
+        let names: [String]
+        let counts: [String: Int]
+    }
+
     init(name: String = "Untitled Study", factors: [DesignFactor] = [], datasets: [Dataset] = []) {
         self.name = name
         self.factors = factors
@@ -114,18 +126,23 @@ final class Study {
     /// ones as needed. Returns the (possibly extended) factor list.
     @discardableResult
     func ensureFactors(count: Int) -> [DesignFactor] {
+        var changed = false
         while factors.count < count {
             factors.append(DesignFactor(name: "Factor \(factors.count + 1)"))
+            changed = true
         }
+        if changed { invalidateDerivedCache() }
         return factors
     }
 
     func add(_ dataset: Dataset) {
         datasets.append(dataset)
+        invalidateDerivedCache()
     }
 
     func removeDataset(_ dataset: Dataset) {
         datasets.removeAll { $0.id == dataset.id }
+        invalidateDerivedCache()
     }
 
     // MARK: - Conditions (categories)
@@ -134,20 +151,12 @@ final class Study {
     /// first-seen order. These correspond to the `<cat>` entries in an MFF's
     /// `categories.xml`.
     var allConditionNames: [String] {
-        var order: [String] = []
-        var seen = Set<String>()
-        for dataset in datasets {
-            for condition in dataset.conditions where !seen.contains(condition.name) {
-                seen.insert(condition.name)
-                order.append(condition.name)
-            }
-        }
-        return order
+        conditionSummary().names
     }
 
     /// Number of datasets that contain a condition with the given name.
     func datasetCount(forCondition name: String) -> Int {
-        datasets.filter { dataset in dataset.conditions.contains { $0.name == name } }.count
+        conditionSummary().counts[name] ?? 0
     }
 
     /// Remove a condition (category) by name from every dataset that has it.
@@ -155,6 +164,7 @@ final class Study {
         for dataset in datasets {
             dataset.conditions.removeAll { $0.name == name }
         }
+        invalidateDerivedCache()
     }
 
     // MARK: - Derived grouping tree
@@ -162,11 +172,20 @@ final class Study {
     /// Build the nested grouping tree by walking `factors` in order. Datasets
     /// missing a level fall into an "Unassigned" bucket at that depth.
     func groupTree() -> [GroupNode] {
+        if let cached = groupTreeCache, cached.revision == derivedRevision {
+            return cached.tree
+        }
+
+        let tree: [GroupNode]
         guard !factors.isEmpty else {
             // No between-subject factors: a single flat list.
-            return [GroupNode(id: "_all", factorName: "", level: "", children: [], datasets: datasets)]
+            tree = [GroupNode(id: "_all", factorName: "", level: "", children: [], datasets: datasets)]
+            groupTreeCache = (derivedRevision, tree)
+            return tree
         }
-        return buildNodes(datasets: datasets, depth: 0, pathPrefix: "")
+        tree = buildNodes(datasets: datasets, depth: 0, pathPrefix: "")
+        groupTreeCache = (derivedRevision, tree)
+        return tree
     }
 
     /// The level value used for grouping at a given factor depth, matching how
@@ -177,15 +196,29 @@ final class Study {
 
     /// All datasets falling under a group-node id (a "/"-joined level path).
     func datasets(inGroupID id: String) -> [Dataset] {
-        guard !factors.isEmpty, id != "_all" else { return datasets }
+        if let cached = groupMembersCache[id], cached.revision == derivedRevision {
+            return cached.datasets
+        }
+
+        let result: [Dataset]
+        guard !factors.isEmpty, id != "_all" else {
+            result = datasets
+            groupMembersCache[id] = (derivedRevision, result)
+            return result
+        }
         let target = id.split(separator: "/").map(String.init)
-        guard target.count <= factors.count else { return [] }
-        return datasets.filter { dataset in
+        guard target.count <= factors.count else {
+            groupMembersCache[id] = (derivedRevision, [])
+            return []
+        }
+        result = datasets.filter { dataset in
             for (depth, level) in target.enumerated() where resolvedLevel(dataset, depth: depth) != level {
                 return false
             }
             return true
         }
+        groupMembersCache[id] = (derivedRevision, result)
+        return result
     }
 
     /// One immediate child group (next factor level down) of a selected group.
@@ -200,10 +233,20 @@ final class Study {
     /// empty id ("") means the whole study, whose children are the top-level
     /// factor levels.
     func childGroups(ofGroupID id: String) -> [ChildGroup] {
-        guard !factors.isEmpty, id != "_all" else { return [] }
+        if let cached = childGroupsCache[id], cached.revision == derivedRevision {
+            return cached.groups
+        }
+
+        guard !factors.isEmpty, id != "_all" else {
+            childGroupsCache[id] = (derivedRevision, [])
+            return []
+        }
         let components = id.isEmpty ? [] : id.split(separator: "/").map(String.init)
         let depth = components.count
-        guard depth < factors.count else { return [] }
+        guard depth < factors.count else {
+            childGroupsCache[id] = (derivedRevision, [])
+            return []
+        }
 
         let members = datasets(inGroupID: id)
         var order: [String] = []
@@ -213,21 +256,67 @@ final class Study {
             if buckets[level] == nil { order.append(level) }
             buckets[level, default: []].append(dataset)
         }
-        return order.map { level in
+        let groups = order.map { level in
             let childID = (components + [level]).joined(separator: "/")
             return ChildGroup(id: childID, label: level, datasets: buckets[level] ?? [])
         }
+        childGroupsCache[id] = (derivedRevision, groups)
+        return groups
     }
 
     /// Condition names shared by every dataset in a group (intersection),
     /// preserving the order seen in the first dataset.
     func sharedConditionNames(inGroupID id: String) -> [String] {
+        if let cached = sharedConditionsCache[id], cached.revision == derivedRevision {
+            return cached.names
+        }
+
         let members = datasets(inGroupID: id)
-        guard let first = members.first else { return [] }
+        guard let first = members.first else {
+            sharedConditionsCache[id] = (derivedRevision, [])
+            return []
+        }
         let ordered = first.conditions.map(\.name)
-        return ordered.filter { name in
+        let names = ordered.filter { name in
             members.allSatisfy { $0.conditions.contains { $0.name == name } }
         }
+        sharedConditionsCache[id] = (derivedRevision, names)
+        return names
+    }
+
+    private func conditionSummary() -> ConditionSummary {
+        if let cached = conditionSummaryCache, cached.revision == derivedRevision {
+            return cached.summary
+        }
+
+        var order: [String] = []
+        var seen = Set<String>()
+        var counts: [String: Int] = [:]
+        for dataset in datasets {
+            var datasetConditions = Set<String>()
+            for condition in dataset.conditions {
+                if seen.insert(condition.name).inserted {
+                    order.append(condition.name)
+                }
+                datasetConditions.insert(condition.name)
+            }
+            for name in datasetConditions {
+                counts[name, default: 0] += 1
+            }
+        }
+
+        let summary = ConditionSummary(names: order, counts: counts)
+        conditionSummaryCache = (derivedRevision, summary)
+        return summary
+    }
+
+    private func invalidateDerivedCache() {
+        derivedRevision += 1
+        conditionSummaryCache = nil
+        groupTreeCache = nil
+        groupMembersCache.removeAll(keepingCapacity: true)
+        childGroupsCache.removeAll(keepingCapacity: true)
+        sharedConditionsCache.removeAll(keepingCapacity: true)
     }
 
     private func buildNodes(datasets: [Dataset], depth: Int, pathPrefix: String) -> [GroupNode] {

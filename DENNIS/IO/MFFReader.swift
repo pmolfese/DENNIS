@@ -401,20 +401,25 @@ nonisolated final class MFFReader {
             expectedSamplingRate = header.samplingRate
 
             if allChannels.isEmpty {
-                allChannels = Array(repeating: [], count: header.numberOfChannels)
+                let estimatedSamples = max(
+                    header.numberOfSamples,
+                    Int(fileSize) / max(header.numberOfChannels * MemoryLayout<Float>.size, 1)
+                )
+                allChannels = (0..<header.numberOfChannels).map { _ in
+                    var channel: [Float] = []
+                    channel.reserveCapacity(estimatedSamples)
+                    return channel
+                }
             }
 
             let data = try readExactly(from: handle, byteCount: header.blockSize, signalURL: signalURL)
-            let sampleMatrix = try decodeSamples(
+            try appendSamples(
                 from: data,
+                to: &allChannels,
                 numberOfChannels: header.numberOfChannels,
                 numberOfSamplesPerChannel: header.numberOfSamples,
                 signalURL: signalURL
             )
-
-            for index in sampleMatrix.indices {
-                allChannels[index].append(contentsOf: sampleMatrix[index])
-            }
 
             totalSamples += header.numberOfSamples
         }
@@ -481,38 +486,33 @@ nonisolated final class MFFReader {
         )
     }
 
-    private func decodeSamples(
+    private func appendSamples(
         from data: Data,
+        to channels: inout [[Float]],
         numberOfChannels: Int,
         numberOfSamplesPerChannel: Int,
         signalURL: URL
-    ) throws -> [[Float]] {
+    ) throws {
         let expectedByteCount = numberOfChannels * numberOfSamplesPerChannel * MemoryLayout<Float>.size
         guard data.count == expectedByteCount else {
             throw MFFReaderError.invalidBinaryData(signalURL, "expected \(expectedByteCount) sample bytes but found \(data.count)")
         }
-
-        var channels = Array(
-            repeating: Array(repeating: Float(0), count: numberOfSamplesPerChannel),
-            count: numberOfChannels
-        )
+        guard channels.count == numberOfChannels else {
+            throw MFFReaderError.inconsistentBlockConfiguration
+        }
 
         data.withUnsafeBytes { rawBuffer in
-            let bytes = rawBuffer.bindMemory(to: UInt8.self)
             for channel in 0..<numberOfChannels {
-                let channelBase = channel * numberOfSamplesPerChannel * 4
+                let writeStart = channels[channel].count
+                channels[channel].append(contentsOf: repeatElement(Float(0), count: numberOfSamplesPerChannel))
+                let channelBase = channel * numberOfSamplesPerChannel * MemoryLayout<Float>.size
                 for sample in 0..<numberOfSamplesPerChannel {
-                    let offset = channelBase + sample * 4
-                    let word = UInt32(bytes[offset])
-                        | (UInt32(bytes[offset + 1]) << 8)
-                        | (UInt32(bytes[offset + 2]) << 16)
-                        | (UInt32(bytes[offset + 3]) << 24)
-                    channels[channel][sample] = Float(bitPattern: word)
+                    let offset = channelBase + sample * MemoryLayout<Float>.size
+                    let word = rawBuffer.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                    channels[channel][writeStart + sample] = Float(bitPattern: UInt32(littleEndian: word))
                 }
             }
         }
-
-        return channels
     }
 
     private func decodeRateDepth(_ value: Int) -> (samplingRate: Int, sampleDepth: Int) {

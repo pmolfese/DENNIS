@@ -26,6 +26,36 @@ struct TopomapView: View {
     var highlightThreshold: Double? = nil
 
     private let interpolationPower: Double = 3
+    private let activeSensors: [SensorPosition]
+    private let currentScale: Double
+
+    init(layout: SensorLayout, values: [Double], timeSeconds: Double,
+         fixedScale: Double?, showsHeader: Bool = true,
+         interpolationStep: CGFloat = 4,
+         usesVerticalColorBar: Bool = false,
+         canvasMinHeight: CGFloat = 260,
+         highlightThreshold: Double? = nil) {
+        self.layout = layout
+        self.values = values
+        self.timeSeconds = timeSeconds
+        self.fixedScale = fixedScale
+        self.showsHeader = showsHeader
+        self.interpolationStep = interpolationStep
+        self.usesVerticalColorBar = usesVerticalColorBar
+        self.canvasMinHeight = canvasMinHeight
+        self.highlightThreshold = highlightThreshold
+        let sensors = layout.positions.filter { $0.channelIndex < values.count }
+        self.activeSensors = sensors
+        if let fixedScale, fixedScale > 0 {
+            self.currentScale = fixedScale
+        } else {
+            let maxAbs = sensors
+                .compactMap { $0.channelIndex < values.count ? values[$0.channelIndex] : nil }
+                .map(abs)
+                .max() ?? 1
+            self.currentScale = maxAbs > 0 ? maxAbs : 1
+        }
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -56,7 +86,7 @@ struct TopomapView: View {
     private var topomapCanvas: some View {
         GeometryReader { proxy in
             let side = min(proxy.size.width, proxy.size.height)
-            Canvas { context, size in
+            Canvas(rendersAsynchronously: true) { context, size in
                 draw(in: &context, size: size)
             }
             .frame(width: side, height: side)
@@ -66,18 +96,7 @@ struct TopomapView: View {
     }
 
     private var scale: Double {
-        if let fixedScale, fixedScale > 0 {
-            return fixedScale
-        }
-        let maxAbs = activeSensors
-            .compactMap { value(for: $0) }
-            .map(abs)
-            .max() ?? 1
-        return maxAbs > 0 ? maxAbs : 1
-    }
-
-    private var activeSensors: [SensorPosition] {
-        layout.positions.filter { $0.channelIndex < values.count }
+        currentScale
     }
 
     private func value(for sensor: SensorPosition) -> Double? {
@@ -89,17 +108,16 @@ struct TopomapView: View {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         // Leave a margin so nose/ears stay inside the canvas.
         let radius = min(size.width, size.height) / 2 * 0.86
-        let currentScale = scale
 
         let sensors = activeSensors
-        let points: [(point: CGPoint, value: Double)] = sensors.compactMap { sensor in
+        let points: [(channelIndex: Int, point: CGPoint, value: Double)] = sensors.compactMap { sensor in
             guard let v = value(for: sensor) else { return nil }
             // +y is anterior; screen y grows downward, so flip y.
             let p = CGPoint(
                 x: center.x + CGFloat(sensor.x) * radius,
                 y: center.y - CGFloat(sensor.y) * radius
             )
-            return (p, v)
+            return (sensor.channelIndex, p, v)
         }
 
         drawInterpolatedField(
@@ -122,7 +140,7 @@ struct TopomapView: View {
         drawNoseAndEars(in: &context, center: center, radius: radius)
 
         // Electrode markers; supra-threshold electrodes get an enlarged ring.
-        for (point, value) in points {
+        for (_, point, value) in points {
             let supra = highlightThreshold.map { abs(value) >= $0 } ?? false
             if supra {
                 let ring = CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
@@ -139,51 +157,38 @@ struct TopomapView: View {
         in context: inout GraphicsContext,
         center: CGPoint,
         radius: CGFloat,
-        points: [(point: CGPoint, value: Double)],
+        points: [(channelIndex: Int, point: CGPoint, value: Double)],
         scale: Double
     ) {
         guard !points.isEmpty else { return }
 
         let step = max(2, interpolationStep)
-        let radiusSquared = radius * radius
-
-        var x = center.x - radius
-        while x <= center.x + radius {
-            var y = center.y - radius
-            while y <= center.y + radius {
-                let dx = x - center.x
-                let dy = y - center.y
-                if dx * dx + dy * dy <= radiusSquared {
-                    let interpolated = idwValue(at: CGPoint(x: x, y: y), points: points)
-                    let color = divergingColor(forNormalized: interpolated / scale)
-                    let cell = CGRect(x: x, y: y, width: step, height: step)
-                    context.fill(Path(cell), with: .color(color))
-                }
-                y += step
-            }
-            x += step
-        }
-    }
-
-    private func idwValue(at location: CGPoint, points: [(point: CGPoint, value: Double)]) -> Double {
-        var weightedSum = 0.0
-        var weightTotal = 0.0
-
-        for (point, value) in points {
-            let dx = Double(location.x - point.x)
-            let dy = Double(location.y - point.y)
-            let distanceSquared = dx * dx + dy * dy
-
-            if distanceSquared < 0.5 {
-                return value
-            }
-
-            let weight = 1.0 / pow(distanceSquared, interpolationPower / 2)
-            weightedSum += weight * value
-            weightTotal += weight
+        let key = TopomapInterpolationCache.cacheKey(
+            layout: layout,
+            valuesCount: values.count,
+            center: center,
+            radius: radius,
+            step: step,
+            power: interpolationPower
+        )
+        let grid = TopomapInterpolationCache.shared.grid(key: key) {
+            TopomapInterpolationGrid(
+                center: center,
+                radius: radius,
+                step: step,
+                power: interpolationPower,
+                points: points.map { ($0.channelIndex, $0.point) }
+            )
         }
 
-        return weightTotal > 0 ? weightedSum / weightTotal : 0
+        for cell in grid.cells {
+            var interpolated = 0.0
+            for weighted in cell.weights where weighted.channelIndex < values.count {
+                interpolated += values[weighted.channelIndex] * weighted.weight
+            }
+            let color = divergingColor(forNormalized: interpolated / scale)
+            context.fill(Path(cell.rect), with: .color(color))
+        }
     }
 
     private func drawNoseAndEars(in context: inout GraphicsContext, center: CGPoint, radius: CGFloat) {
@@ -284,5 +289,114 @@ struct TopomapView: View {
                 blue: mid.blue + (warm.blue - mid.blue) * t
             )
         }
+    }
+}
+
+private nonisolated struct TopomapWeightedSensor {
+    let channelIndex: Int
+    let weight: Double
+}
+
+private nonisolated struct TopomapInterpolationCell {
+    let rect: CGRect
+    let weights: [TopomapWeightedSensor]
+}
+
+private nonisolated struct TopomapInterpolationGrid {
+    let cells: [TopomapInterpolationCell]
+
+    init(center: CGPoint, radius: CGFloat, step: CGFloat, power: Double,
+         points: [(channelIndex: Int, point: CGPoint)]) {
+        let radiusSquared = radius * radius
+        var cells: [TopomapInterpolationCell] = []
+        cells.reserveCapacity(Int((radius * radius) / max(step * step, 1) * .pi))
+
+        var x = center.x - radius
+        while x <= center.x + radius {
+            var y = center.y - radius
+            while y <= center.y + radius {
+                let dx = x - center.x
+                let dy = y - center.y
+                if dx * dx + dy * dy <= radiusSquared {
+                    let location = CGPoint(x: x, y: y)
+                    let weights = Self.weights(at: location, points: points, power: power)
+                    let cell = CGRect(x: x, y: y, width: step, height: step)
+                    cells.append(TopomapInterpolationCell(rect: cell, weights: weights))
+                }
+                y += step
+            }
+            x += step
+        }
+
+        self.cells = cells
+    }
+
+    private static func weights(at location: CGPoint,
+                                points: [(channelIndex: Int, point: CGPoint)],
+                                power: Double) -> [TopomapWeightedSensor] {
+        var raw: [(Int, Double)] = []
+        raw.reserveCapacity(points.count)
+        var total = 0.0
+
+        for (channelIndex, point) in points {
+            let dx = Double(location.x - point.x)
+            let dy = Double(location.y - point.y)
+            let distanceSquared = dx * dx + dy * dy
+
+            if distanceSquared < 0.5 {
+                return [TopomapWeightedSensor(channelIndex: channelIndex, weight: 1)]
+            }
+
+            let weight = 1.0 / pow(distanceSquared, power / 2)
+            raw.append((channelIndex, weight))
+            total += weight
+        }
+
+        guard total > 0 else { return [] }
+        return raw.map { TopomapWeightedSensor(channelIndex: $0.0, weight: $0.1 / total) }
+    }
+}
+
+private nonisolated final class TopomapInterpolationCache {
+    static let shared = TopomapInterpolationCache()
+
+    private final class Box {
+        let value: TopomapInterpolationGrid
+        init(_ value: TopomapInterpolationGrid) { self.value = value }
+    }
+
+    private let cache = NSCache<NSString, Box>()
+
+    private init() {
+        cache.countLimit = 8
+    }
+
+    func grid(key: String, build: () -> TopomapInterpolationGrid) -> TopomapInterpolationGrid {
+        let cacheKey = key as NSString
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached.value
+        }
+        let value = build()
+        cache.setObject(Box(value), forKey: cacheKey)
+        return value
+    }
+
+    static func cacheKey(layout: SensorLayout, valuesCount: Int,
+                         center: CGPoint, radius: CGFloat,
+                         step: CGFloat, power: Double) -> String {
+        var hasher = Hasher()
+        hasher.combine(layout.name)
+        hasher.combine(valuesCount)
+        hasher.combine(Int((center.x * 10).rounded()))
+        hasher.combine(Int((center.y * 10).rounded()))
+        hasher.combine(Int((radius * 10).rounded()))
+        hasher.combine(Int((step * 10).rounded()))
+        hasher.combine(power)
+        for sensor in layout.positions where sensor.channelIndex < valuesCount {
+            hasher.combine(sensor.channelIndex)
+            hasher.combine(Int((sensor.x * 10_000).rounded()))
+            hasher.combine(Int((sensor.y * 10_000).rounded()))
+        }
+        return "topomap-\(hasher.finalize())"
     }
 }

@@ -40,31 +40,37 @@ struct OverlayWaveformView: View {
     var showsCursorReadout: Bool = true
     /// Show the trace legend above the waveform.
     var showsLegend: Bool = true
+    private let stats: OverlayWaveformRenderStats
 
     /// Distinct, color-blind-friendlyish palette for overlays.
     static let palette: [Color] = [.blue, .red, .green, .orange, .purple, .teal, .pink, .brown]
 
-    private var sampleCount: Int { traces.map(\.sampleCount).max() ?? 0 }
+    init(traces: [OverlayTrace], samplingRate: Double, baselineSamples: Int,
+         showsCentroid: Bool, cursorSample: Binding<Int>,
+         showsStandardError: Bool = false,
+         shadedMSRanges: [ClosedRange<Double>] = [],
+         showsCursorReadout: Bool = true,
+         showsLegend: Bool = true) {
+        self.traces = traces
+        self.samplingRate = samplingRate
+        self.baselineSamples = baselineSamples
+        self.showsCentroid = showsCentroid
+        self._cursorSample = cursorSample
+        self.showsStandardError = showsStandardError
+        self.shadedMSRanges = shadedMSRanges
+        self.showsCursorReadout = showsCursorReadout
+        self.showsLegend = showsLegend
+        self.stats = OverlayWaveformRenderStats(
+            traces: traces,
+            showsCentroid: showsCentroid,
+            showsStandardError: showsStandardError
+        )
+    }
+
+    private var sampleCount: Int { stats.sampleCount }
     private var markerBandHeight: CGFloat { shadedMSRanges.isEmpty ? 0 : 24 }
     private let yAxisWidth: CGFloat = 48
-
-    private var amplitudeBound: Double {
-        let maxAbs = traces.reduce(0.0) { partial, trace in
-            let sampleMax = trace.samples.reduce(0.0) { channelPartial, channel in
-                max(channelPartial, channel.reduce(0.0) { max($0, Double(abs($1))) })
-            }
-            var centroidMax = 0.0
-            if showsCentroid {
-                let se = (showsStandardError ? trace.centroidSE : nil)
-                for i in trace.centroid.indices {
-                    let band = se.map { i < $0.count ? Double($0[i]) : 0 } ?? 0
-                    centroidMax = max(centroidMax, abs(Double(trace.centroid[i])) + band)
-                }
-            }
-            return max(partial, max(sampleMax, centroidMax))
-        }
-        return maxAbs > 0 ? maxAbs : 1
-    }
+    private var amplitudeBound: Double { stats.amplitudeBound }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -80,7 +86,7 @@ struct OverlayWaveformView: View {
                     yAxisScale(plotSize: plotSize)
                         .frame(width: yAxisWidth, height: plotHeight, alignment: .leading)
                     ZStack(alignment: .topLeading) {
-                        Canvas { context, canvasSize in draw(in: &context, size: canvasSize) }
+                        Canvas(rendersAsynchronously: true) { context, canvasSize in draw(in: &context, size: canvasSize) }
                             .frame(width: plotSize.width, height: plotHeight, alignment: .top)
                         stimulusFlag(in: plotSize)
                         temporalRangeMarkers(plotSize: plotSize)
@@ -143,6 +149,30 @@ struct OverlayWaveformView: View {
         let midY = size.height / 2
         let yScale = (size.height / 2 - 8) / bound
         let xScale = size.width / CGFloat(sampleCount - 1)
+        let pathSet = OverlayWaveformPathCache.shared.paths(
+            key: stats.cacheKey(prefix: "overlay", size: size, extra: "\(bound)")
+        ) {
+            OverlayWaveformPathSet(traces: traces.map { trace in
+                OverlayTracePathSet(
+                    channels: trace.samples.compactMap { channel in
+                        channel.count == sampleCount
+                            ? Self.path(for: channel, midY: midY, xScale: xScale, yScale: yScale)
+                            : nil
+                    },
+                    centroid: showsCentroid && trace.centroid.count == sampleCount
+                        ? Self.path(for: trace.centroid, midY: midY, xScale: xScale, yScale: yScale)
+                        : nil,
+                    band: showsCentroid && showsStandardError
+                        ? trace.centroidSE.flatMap { se in
+                            se.count == sampleCount
+                                ? Self.bandPath(center: trace.centroid, half: se,
+                                                midY: midY, xScale: xScale, yScale: yScale)
+                                : nil
+                        }
+                        : nil
+                )
+            })
+        }
 
         // Gentle shading for the active temporal-factor window(s).
         for range in shadedMSRanges where samplingRate > 0 {
@@ -166,28 +196,29 @@ struct OverlayWaveformView: View {
                            style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
 
-        for trace in traces {
-            for channel in trace.samples where channel.count == sampleCount {
+        for (trace, paths) in zip(traces, pathSet.traces) {
+            for path in paths.channels {
                 context.stroke(
-                    path(for: channel, midY: midY, xScale: xScale, yScale: yScale),
+                    path,
                     with: .color(trace.color.opacity(0.22)),
                     lineWidth: 0.8
                 )
             }
-            if showsCentroid, trace.centroid.count == sampleCount {
+            if showsCentroid {
                 // Translucent ±SE band behind the mean line.
-                if showsStandardError, let se = trace.centroidSE, se.count == sampleCount {
+                if showsStandardError, let band = paths.band {
                     context.fill(
-                        bandPath(center: trace.centroid, half: se,
-                                 midY: midY, xScale: xScale, yScale: yScale),
+                        band,
                         with: .color(trace.color.opacity(0.18))
                     )
                 }
-                context.stroke(
-                    path(for: trace.centroid, midY: midY, xScale: xScale, yScale: yScale),
-                    with: .color(trace.color.opacity(0.95)),
-                    lineWidth: 2.2
-                )
+                if let centroid = paths.centroid {
+                    context.stroke(
+                        centroid,
+                        with: .color(trace.color.opacity(0.95)),
+                        lineWidth: 2.2
+                    )
+                }
             }
         }
 
@@ -267,7 +298,7 @@ struct OverlayWaveformView: View {
 
     // MARK: - Time helpers
 
-    private func path(for channel: [Float], midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
+    private static func path(for channel: [Float], midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: 0, y: midY - CGFloat(channel[0]) * yScale))
         for i in 1..<channel.count {
@@ -277,8 +308,8 @@ struct OverlayWaveformView: View {
     }
 
     /// Closed band between `center + half` (upper) and `center − half` (lower).
-    private func bandPath(center: [Float], half: [Float],
-                          midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
+    private static func bandPath(center: [Float], half: [Float],
+                                 midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
         var path = Path()
         let n = min(center.count, half.count)
         guard n > 1 else { return path }
@@ -334,5 +365,98 @@ struct OverlayWaveformView: View {
         guard samplingRate > 0 else { return "\(sample)" }
         let ms = Double(sample - baselineSamples) / samplingRate * 1000
         return String(format: "%.0f ms", ms)
+    }
+}
+
+private nonisolated struct OverlayWaveformRenderStats {
+    let sampleCount: Int
+    let amplitudeBound: Double
+    private let fingerprint: Int
+
+    init(traces: [OverlayTrace], showsCentroid: Bool, showsStandardError: Bool) {
+        self.sampleCount = traces.map(\.sampleCount).max() ?? 0
+        var maxAbs = 0.0
+        var hasher = Hasher()
+        hasher.combine(traces.count)
+        hasher.combine(sampleCount)
+        hasher.combine(showsCentroid)
+        hasher.combine(showsStandardError)
+
+        for trace in traces {
+            hasher.combine(trace.id)
+            hasher.combine(trace.label)
+            hasher.combine(trace.samples.count)
+            for channel in trace.samples {
+                hasher.combine(channel.count)
+                for value in channel {
+                    maxAbs = max(maxAbs, Double(abs(value)))
+                    hasher.combine(value.bitPattern)
+                }
+            }
+
+            if showsCentroid {
+                hasher.combine("centroid")
+                hasher.combine(trace.centroid.count)
+                for (i, value) in trace.centroid.enumerated() {
+                    let band = showsStandardError
+                        ? trace.centroidSE.map { i < $0.count ? Double($0[i]) : 0 } ?? 0
+                        : 0
+                    maxAbs = max(maxAbs, abs(Double(value)) + band)
+                    hasher.combine(value.bitPattern)
+                }
+            }
+
+            if showsStandardError, let se = trace.centroidSE {
+                hasher.combine("se")
+                hasher.combine(se.count)
+                for value in se {
+                    hasher.combine(value.bitPattern)
+                }
+            }
+        }
+
+        self.amplitudeBound = maxAbs > 0 ? maxAbs : 1
+        self.fingerprint = hasher.finalize()
+    }
+
+    func cacheKey(prefix: String, size: CGSize, extra: String = "") -> String {
+        let width = Int((size.width * 2).rounded())
+        let height = Int((size.height * 2).rounded())
+        return "\(prefix)-\(fingerprint)-\(width)x\(height)-\(extra)"
+    }
+}
+
+private nonisolated struct OverlayTracePathSet {
+    let channels: [Path]
+    let centroid: Path?
+    let band: Path?
+}
+
+private nonisolated struct OverlayWaveformPathSet {
+    let traces: [OverlayTracePathSet]
+}
+
+private nonisolated final class OverlayWaveformPathCache {
+    static let shared = OverlayWaveformPathCache()
+
+    private final class Box {
+        let value: OverlayWaveformPathSet
+        init(_ value: OverlayWaveformPathSet) { self.value = value }
+    }
+
+    private let cache = NSCache<NSString, Box>()
+
+    private init() {
+        cache.countLimit = 64
+    }
+
+    func paths(key: String, build: () -> OverlayWaveformPathSet) -> OverlayWaveformPathSet {
+        let cacheKey = key as NSString
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached.value
+        }
+        let value = build()
+        cache.setObject(Box(value), forKey: cacheKey)
+        return value
     }
 }

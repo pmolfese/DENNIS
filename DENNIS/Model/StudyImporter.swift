@@ -77,16 +77,7 @@ final class StudyImporter {
             guard !packages.isEmpty else { return (0, []) }
 
             let (factorCount, levelsByURL) = Self.inferLevels(for: packages)
-            let raw = packages.map { url -> RawCandidate in
-                let levels = levelsByURL[url] ?? []
-                do {
-                    let conditions = try loader.inspectConditions(at: url)
-                    return RawCandidate(url: url, conditions: conditions, levels: levels, warning: nil)
-                } catch {
-                    return RawCandidate(url: url, conditions: [], levels: levels,
-                                        warning: error.localizedDescription)
-                }
-            }
+            let raw = Self.inspectPackages(packages, levelsByURL: levelsByURL, loader: loader)
             return (factorCount, raw)
         }.value
 
@@ -226,5 +217,37 @@ final class StudyImporter {
         }
 
         return (maxDepth, levels)
+    }
+
+    /// Category preview is independent per package, so inspect in parallel while
+    /// preserving the sorted package order shown in the import sheet.
+    private nonisolated static func inspectPackages(
+        _ packages: [URL],
+        levelsByURL: [URL: [String]],
+        loader: MFFAveragedLoader
+    ) -> [RawCandidate] {
+        guard !packages.isEmpty else { return [] }
+
+        var output = Array<RawCandidate?>(repeating: nil, count: packages.count)
+        let lock = NSLock()
+
+        DispatchQueue.concurrentPerform(iterations: packages.count) { index in
+            let url = packages[index]
+            let levels = levelsByURL[url] ?? []
+            let candidate: RawCandidate
+            do {
+                let conditions = try loader.inspectConditions(at: url)
+                candidate = RawCandidate(url: url, conditions: conditions, levels: levels, warning: nil)
+            } catch {
+                candidate = RawCandidate(url: url, conditions: [], levels: levels,
+                                         warning: error.localizedDescription)
+            }
+
+            lock.lock()
+            output[index] = candidate
+            lock.unlock()
+        }
+
+        return output.compactMap { $0 }
     }
 }

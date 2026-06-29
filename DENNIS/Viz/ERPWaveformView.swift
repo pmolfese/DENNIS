@@ -21,22 +21,26 @@ struct ERPWaveformView: View {
     @Binding var cursorSample: Int
     /// Optional bold overlay trace (e.g. the channel centroid), `samples` long.
     var centroid: [Float]? = nil
+    private let stats: WaveformRenderStats
 
-    private var sampleCount: Int { samples.first?.count ?? 0 }
-
-    /// Symmetric amplitude bound (µV) across all channels and samples.
-    private var amplitudeBound: Double {
-        let maxAbs = samples.reduce(0.0) { partial, channel in
-            max(partial, channel.reduce(0.0) { max($0, Double(abs($1))) })
-        }
-        return maxAbs > 0 ? maxAbs : 1
+    init(samples: [[Float]], samplingRate: Double, baselineSamples: Int,
+         cursorSample: Binding<Int>, centroid: [Float]? = nil) {
+        self.samples = samples
+        self.samplingRate = samplingRate
+        self.baselineSamples = baselineSamples
+        self._cursorSample = cursorSample
+        self.centroid = centroid
+        self.stats = WaveformRenderStats(samples: samples, centroid: centroid)
     }
+
+    private var sampleCount: Int { stats.sampleCount }
+    private var amplitudeBound: Double { stats.amplitudeBound }
 
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
             ZStack(alignment: .topLeading) {
-                Canvas { context, canvasSize in
+                Canvas(rendersAsynchronously: true) { context, canvasSize in
                     draw(in: &context, size: canvasSize)
                 }
                 stimulusFlag(in: size)
@@ -67,6 +71,22 @@ struct ERPWaveformView: View {
         let midY = size.height / 2
         let yScale = (size.height / 2 - 8) / bound
         let xScale = size.width / CGFloat(sampleCount - 1)
+        let paths = WaveformPathCache.shared.paths(
+            key: stats.cacheKey(prefix: "erp", size: size, extra: "\(bound)")
+        ) {
+            WaveformPathSet(
+                channels: samples.compactMap { channel in
+                    channel.count == sampleCount
+                        ? Self.path(for: channel, midY: midY, xScale: xScale, yScale: yScale)
+                        : nil
+                },
+                centroid: centroid.flatMap { trace in
+                    trace.count == sampleCount
+                        ? Self.path(for: trace, midY: midY, xScale: xScale, yScale: yScale)
+                        : nil
+                }
+            )
+        }
 
         // Zero baseline (amplitude = 0).
         var zeroLine = Path()
@@ -85,15 +105,14 @@ struct ERPWaveformView: View {
         }
 
         // One translucent trace per channel (the "butterfly").
-        for channel in samples {
-            guard channel.count == sampleCount else { continue }
-            context.stroke(path(for: channel, midY: midY, xScale: xScale, yScale: yScale),
+        for path in paths.channels {
+            context.stroke(path,
                            with: .color(.accentColor.opacity(0.30)), lineWidth: 0.6)
         }
 
         // Optional centroid overlay (bold).
-        if let centroid, centroid.count == sampleCount {
-            context.stroke(path(for: centroid, midY: midY, xScale: xScale, yScale: yScale),
+        if let centroid = paths.centroid {
+            context.stroke(centroid,
                            with: .color(.primary.opacity(0.85)), lineWidth: 2)
         }
 
@@ -105,7 +124,7 @@ struct ERPWaveformView: View {
         context.stroke(cursor, with: .color(.yellow), lineWidth: 1.5)
     }
 
-    private func path(for channel: [Float], midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
+    private static func path(for channel: [Float], midY: CGFloat, xScale: CGFloat, yScale: Double) -> Path {
         var path = Path()
         path.move(to: CGPoint(x: 0, y: midY - CGFloat(channel[0]) * yScale))
         for i in 1..<channel.count {
@@ -167,5 +186,92 @@ struct ERPWaveformView: View {
         guard samplingRate > 0 else { return "\(sample)" }
         let ms = Double(sample - baselineSamples) / samplingRate * 1000
         return String(format: "%.0f ms", ms)
+    }
+}
+
+nonisolated struct WaveformRenderStats {
+    let sampleCount: Int
+    let amplitudeBound: Double
+    private let fingerprint: Int
+
+    init(samples: [[Float]], centroid: [Float]? = nil,
+         standardErrors: [[Float]?] = [], includesCentroid: Bool = true,
+         includesStandardError: Bool = false) {
+        self.sampleCount = samples.first?.count ?? centroid?.count ?? 0
+        var maxAbs = 0.0
+        var hasher = Hasher()
+        hasher.combine(samples.count)
+        hasher.combine(sampleCount)
+
+        for channel in samples {
+            hasher.combine(channel.count)
+            for value in channel {
+                maxAbs = max(maxAbs, Double(abs(value)))
+                hasher.combine(value.bitPattern)
+            }
+        }
+
+        if includesCentroid, let centroid {
+            hasher.combine("centroid")
+            hasher.combine(centroid.count)
+            for value in centroid {
+                maxAbs = max(maxAbs, Double(abs(value)))
+                hasher.combine(value.bitPattern)
+            }
+        }
+
+        if includesStandardError {
+            hasher.combine("se")
+            for maybeSE in standardErrors {
+                guard let se = maybeSE else {
+                    hasher.combine(0)
+                    continue
+                }
+                hasher.combine(se.count)
+                for value in se {
+                    maxAbs = max(maxAbs, Double(abs(value)))
+                    hasher.combine(value.bitPattern)
+                }
+            }
+        }
+
+        self.amplitudeBound = maxAbs > 0 ? maxAbs : 1
+        self.fingerprint = hasher.finalize()
+    }
+
+    func cacheKey(prefix: String, size: CGSize, extra: String = "") -> String {
+        let width = Int((size.width * 2).rounded())
+        let height = Int((size.height * 2).rounded())
+        return "\(prefix)-\(fingerprint)-\(width)x\(height)-\(extra)"
+    }
+}
+
+nonisolated struct WaveformPathSet {
+    let channels: [Path]
+    let centroid: Path?
+}
+
+nonisolated final class WaveformPathCache {
+    static let shared = WaveformPathCache()
+
+    private final class Box {
+        let value: WaveformPathSet
+        init(_ value: WaveformPathSet) { self.value = value }
+    }
+
+    private let cache = NSCache<NSString, Box>()
+
+    private init() {
+        cache.countLimit = 96
+    }
+
+    func paths(key: String, build: () -> WaveformPathSet) -> WaveformPathSet {
+        let cacheKey = key as NSString
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached.value
+        }
+        let value = build()
+        cache.setObject(Box(value), forKey: cacheKey)
+        return value
     }
 }
