@@ -12,9 +12,14 @@ import SwiftUI
 
 struct CategoriesBar: View {
     @Environment(Study.self) private var study
+    @Binding var selection: SidebarSelection?
 
     /// The condition whose deletion is awaiting confirmation.
     @State private var pendingDeletion: String?
+
+    init(selection: Binding<SidebarSelection?> = .constant(nil)) {
+        self._selection = selection
+    }
 
     var body: some View {
         let names = study.allConditionNames
@@ -46,7 +51,12 @@ struct CategoriesBar: View {
                 titleVisibility: .visible
             ) {
                 Button("Delete from all subjects", role: .destructive) {
-                    if let name = pendingDeletion { study.removeCondition(named: name) }
+                    if let name = pendingDeletion {
+                        let removedIDs = Set(study.removeCondition(named: name))
+                        if case .condition(let id) = selection, removedIDs.contains(id) {
+                            selection = nil
+                        }
+                    }
                     pendingDeletion = nil
                 }
                 Button("Cancel", role: .cancel) { pendingDeletion = nil }

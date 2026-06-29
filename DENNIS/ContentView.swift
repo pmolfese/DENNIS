@@ -27,13 +27,13 @@ struct ContentView: View {
     @State private var showFileImporter = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            CategoriesBar()
-            splitView
-        }
+        splitView
         .sheet(item: $plan) { plan in
             ImportSheet(plan: plan) { confirmed in
                 importer.commit(confirmed, into: study)
+                if !confirmed.validCandidates.isEmpty {
+                    selection = .group(study.factors.isEmpty ? "_all" : "")
+                }
             }
         }
         .fileImporter(

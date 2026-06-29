@@ -102,7 +102,7 @@ final class Study {
     var factors: [DesignFactor]
     var datasets: [Dataset]
 
-    @ObservationIgnored private var derivedRevision = 0
+    private var derivedRevision = 0
     @ObservationIgnored private var conditionSummaryCache: (revision: Int, summary: ConditionSummary)?
     @ObservationIgnored private var groupTreeCache: (revision: Int, tree: [GroupNode])?
     @ObservationIgnored private var groupMembersCache: [String: (revision: Int, datasets: [Dataset])] = [:]
@@ -160,11 +160,15 @@ final class Study {
     }
 
     /// Remove a condition (category) by name from every dataset that has it.
-    func removeCondition(named name: String) {
+    @discardableResult
+    func removeCondition(named name: String) -> [UUID] {
+        var removedIDs: [UUID] = []
         for dataset in datasets {
+            removedIDs += dataset.conditions.filter { $0.name == name }.map(\.id)
             dataset.conditions.removeAll { $0.name == name }
         }
         invalidateDerivedCache()
+        return removedIDs
     }
 
     // MARK: - Derived grouping tree

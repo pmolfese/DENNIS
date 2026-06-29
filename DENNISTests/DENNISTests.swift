@@ -113,4 +113,25 @@ struct ImportInferenceTests {
         #expect(sixMo.children.count == 2)          // MZ, DZ
         #expect(sixMo.children.allSatisfy { $0.datasets.count == 1 })
     }
+
+    @Test func deletingConditionInvalidatesSharedConditionCache() {
+        let study = Study()
+        let url = URL(fileURLWithPath: "/tmp/x.mff")
+        let firstA = Condition(name: "A")
+        let firstB = Condition(name: "B")
+        let secondA = Condition(name: "A")
+        let secondB = Condition(name: "B")
+        study.add(Dataset(name: "s1", sourceURL: url, conditions: [firstA, firstB]))
+        study.add(Dataset(name: "s2", sourceURL: url, conditions: [secondA, secondB]))
+
+        #expect(study.sharedConditionNames(inGroupID: "") == ["A", "B"])
+        #expect(study.allConditionNames == ["A", "B"])
+
+        let removed = Set(study.removeCondition(named: "A"))
+
+        #expect(removed == Set([firstA.id, secondA.id]))
+        #expect(study.sharedConditionNames(inGroupID: "") == ["B"])
+        #expect(study.allConditionNames == ["B"])
+        #expect(study.datasetCount(forCondition: "A") == 0)
+    }
 }
