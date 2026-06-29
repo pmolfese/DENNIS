@@ -27,20 +27,9 @@ struct ContentView: View {
     @State private var showFileImporter = false
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(selection: $selection, onDropURLs: handleDroppedURLs)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 290)
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            showFileImporter = true
-                        } label: {
-                            Label("Add Files", systemImage: "plus")
-                        }
-                    }
-                }
-        } detail: {
-            DetailView(selection: selection)
+        VStack(spacing: 0) {
+            CategoriesBar()
+            splitView
         }
         .sheet(item: $plan) { plan in
             ImportSheet(plan: plan) { confirmed in
@@ -55,6 +44,24 @@ struct ContentView: View {
             if case .success(let urls) = result {
                 handleDroppedURLs(urls)
             }
+        }
+    }
+
+    private var splitView: some View {
+        NavigationSplitView {
+            SidebarView(selection: $selection, onDropURLs: handleDroppedURLs)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 290)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            showFileImporter = true
+                        } label: {
+                            Label("Add Files", systemImage: "plus")
+                        }
+                    }
+                }
+        } detail: {
+            DetailView(selection: selection)
         }
     }
 

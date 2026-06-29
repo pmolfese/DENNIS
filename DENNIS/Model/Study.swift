@@ -128,6 +128,35 @@ final class Study {
         datasets.removeAll { $0.id == dataset.id }
     }
 
+    // MARK: - Conditions (categories)
+
+    /// The union of all condition (category) names across every dataset, in
+    /// first-seen order. These correspond to the `<cat>` entries in an MFF's
+    /// `categories.xml`.
+    var allConditionNames: [String] {
+        var order: [String] = []
+        var seen = Set<String>()
+        for dataset in datasets {
+            for condition in dataset.conditions where !seen.contains(condition.name) {
+                seen.insert(condition.name)
+                order.append(condition.name)
+            }
+        }
+        return order
+    }
+
+    /// Number of datasets that contain a condition with the given name.
+    func datasetCount(forCondition name: String) -> Int {
+        datasets.filter { dataset in dataset.conditions.contains { $0.name == name } }.count
+    }
+
+    /// Remove a condition (category) by name from every dataset that has it.
+    func removeCondition(named name: String) {
+        for dataset in datasets {
+            dataset.conditions.removeAll { $0.name == name }
+        }
+    }
+
     // MARK: - Derived grouping tree
 
     /// Build the nested grouping tree by walking `factors` in order. Datasets
