@@ -113,6 +113,10 @@ struct TensorView: View {
                 }
                 Divider()
                 if source == .erp { erpPreprocessingSection } else { tfSection }
+                if source == .erp, !conditionNames.isEmpty {
+                    Divider()
+                    conditionMetadataSection
+                }
                 Divider()
                 diagnosticsSection
                 Divider()
@@ -172,6 +176,72 @@ struct TensorView: View {
                 Text("–").foregroundStyle(.secondary)
                 TextField("post", value: $trimPost, format: .number).frame(width: 60).textFieldStyle(.roundedBorder)
                 Stepper("Downsample ×\(downsample)", value: $downsample, in: 1...16).fixedSize()
+            }
+        }
+        .font(.callout)
+    }
+
+    // MARK: - Within-subject condition metadata
+
+    private var conditionMetadataSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("Condition metadata").font(.headline)
+                HelpButton(text: "Defines within-subject factor levels for each condition cell. "
+                           + "PARAFAC still has one condition mode; these labels let reconstruction "
+                           + "scale a component by the mean loading for a selected condition-factor level.")
+                Spacer()
+                Button {
+                    study.addConditionFactor(defaultsToConditionNames: study.conditionFactors.isEmpty)
+                } label: {
+                    Label("Add Factor", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if study.conditionFactors.isEmpty {
+                Text("Add a condition factor to label condition cells as within-subject levels.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("Cell").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .frame(width: 150, alignment: .leading)
+                        ForEach(study.conditionFactors.indices, id: \.self) { index in
+                            HStack(spacing: 3) {
+                                TextField("Factor \(index + 1)", text: conditionFactorNameBinding(index))
+                                    .textFieldStyle(.roundedBorder)
+                                if study.conditionFactors.count > 1 {
+                                    Button {
+                                        study.removeConditionFactor(at: index)
+                                    } label: {
+                                        Image(systemName: "minus.circle.fill")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(width: 145, alignment: .leading)
+                        }
+                    }
+                    .font(.caption)
+
+                    ForEach(conditionNames, id: \.self) { condition in
+                        HStack(spacing: 8) {
+                            Text(condition)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .frame(width: 150, alignment: .leading)
+                            ForEach(study.conditionFactors.indices, id: \.self) { factorIndex in
+                                TextField("Level", text: conditionLevelBinding(condition: condition, factorIndex: factorIndex))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 145)
+                            }
+                        }
+                    }
+                }
             }
         }
         .font(.callout)
@@ -375,7 +445,9 @@ struct TensorView: View {
                     result: result, modeTypes: cpModeTypes, layout: groupSensorLayout,
                     timesMS: cpTimesMS, freqs: cpFreqs, conditionNames: conditionNames,
                     subjectLevels: subjectLevels(), factorNames: study.factors.map(\.name),
-                    coreConsistency: cpCoreConsistency)
+                    conditionMetadata: study.conditionMetadata(for: conditionNames),
+                    coreConsistency: cpCoreConsistency,
+                    observedContext: cpObservedContext())
             } else {
                 Text("Run the diagnostics first to get a recommended rank, then decompose.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -436,6 +508,36 @@ struct TensorView: View {
 
     private func subjectLevels() -> [[String]] {
         EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.levels) ?? []
+    }
+
+    private func conditionFactorNameBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                index < study.conditionFactors.count ? study.conditionFactors[index].name : ""
+            },
+            set: {
+                if index < study.conditionFactors.count { study.conditionFactors[index].name = $0 }
+            }
+        )
+    }
+
+    private func conditionLevelBinding(condition: String, factorIndex: Int) -> Binding<String> {
+        Binding(
+            get: { study.conditionLevel(conditionName: condition, factorIndex: factorIndex) },
+            set: { study.setConditionLevel(conditionName: condition, factorIndex: factorIndex, level: $0) }
+        )
+    }
+
+    private func cpObservedContext() -> CPObservedContext? {
+        guard source == .erp,
+              let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
+        let data = PCAAnalysisModel.makeClusterData(members: snapshot.subjects, conditionNames: conditionNames)
+        guard !data.subjects.isEmpty else { return nil }
+        return CPObservedContext(
+            subjects: data.subjects,
+            baselineSamples: data.baseline,
+            samplingRate: data.samplingRate
+        )
     }
 
     private func currentTimeAxis() -> EPTensor.TimeAxis? {

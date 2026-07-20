@@ -134,4 +134,25 @@ struct ImportInferenceTests {
         #expect(study.allConditionNames == ["B"])
         #expect(study.datasetCount(forCondition: "A") == 0)
     }
+
+    @Test func conditionMetadataTracksLevelsAcrossSubjects() {
+        let study = Study()
+        let url = URL(fileURLWithPath: "/tmp/x.mff")
+        study.add(Dataset(name: "s1", sourceURL: url, conditions: [Condition(name: "Go"), Condition(name: "NoGo")]))
+        study.add(Dataset(name: "s2", sourceURL: url, conditions: [Condition(name: "Go"), Condition(name: "NoGo")]))
+
+        study.addConditionFactor(defaultsToConditionNames: true)
+        study.conditionFactors[0].name = "Response"
+        study.addConditionFactor()
+        study.conditionFactors[1].name = "Valence"
+        study.setConditionLevel(conditionName: "Go", factorIndex: 1, level: "Positive")
+        study.setConditionLevel(conditionName: "NoGo", factorIndex: 1, level: "Negative")
+
+        let metadata = study.conditionMetadata(for: ["Go", "NoGo"])
+        #expect(metadata.factorNames == ["Response", "Valence"])
+        #expect(metadata.levelsByCondition == [["Go", "Positive"], ["NoGo", "Negative"]])
+        #expect(study.datasets.allSatisfy { dataset in
+            dataset.conditions.first { $0.name == "Go" }?.levels == ["Go", "Positive"]
+        })
+    }
 }

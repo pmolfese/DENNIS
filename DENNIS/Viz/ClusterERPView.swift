@@ -301,7 +301,7 @@ struct ClusterERPView: View {
     }
 }
 
-private nonisolated enum ClusterERPTraceBuilder {
+nonisolated enum ClusterERPTraceBuilder {
     struct Input: Sendable {
         let groupBy: Set<String>
         let conditionDimension: String
