@@ -55,6 +55,16 @@ struct DetailView: View {
                     description: Text("Select a group in the sidebar to run a 4-way PARAFAC analysis.")
                 )
             }
+        case .waveform:
+            if case .group(let id) = selection {
+                WaveformAnalysisView(groupID: id).id(id)
+            } else {
+                ContentUnavailableView(
+                    "Waveform Analysis",
+                    systemImage: "waveform.path.ecg.rectangle",
+                    description: Text("Select a group in the sidebar to define waveform measurement windows.")
+                )
+            }
         case .pls:
             if case .group(let id) = selection {
                 PLSView(groupID: id).id(id)

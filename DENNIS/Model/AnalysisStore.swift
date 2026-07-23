@@ -14,6 +14,7 @@ import Observation
 enum AppMode: String, CaseIterable, Identifiable {
     case pca = "PCA"
     case tensor = "Tensor"
+    case waveform = "Waveform Analysis"
     case pls = "PLS"
     case clustering = "Clustering"
     case stats = "Statistical Analysis"
