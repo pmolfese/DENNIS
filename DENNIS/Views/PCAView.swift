@@ -49,8 +49,10 @@ struct PCAView: View {
     @State private var screeMode: PCAMode = .temporal
     @State private var pcaFactors = 3
     @State private var pcaRotation: PCARotation = .promax
+    @State private var runPCAJackknife = false
     @State private var dualSpatialFactors = 3
     @State private var dualSecondRotation: PCARotation = .infomax
+    @State private var runDualJackknife = false
 
     // PCA window / preprocessing (milliseconds; auto-populated from the data).
     @State private var trimPre: Double = -100
@@ -365,11 +367,15 @@ struct PCAView: View {
                     Text("Unrotated").tag(PCARotation.unrotated)
                 }
                 .fixedSize()
+                Toggle("Jackknife LOO", isOn: $runPCAJackknife)
+                    .toggleStyle(.checkbox)
+                    .help("Reruns the PCA once per subject, each time leaving one subject out, then summarizes loading stability.")
                 Button {
                     let axis = currentTimeAxis()
                     model.runTemporalPCA(members: members, conditionNames: conditionNames,
                                          timeIndices: axis?.indices, timesMS: axis?.timesMS ?? [],
-                                         rotation: pcaRotation, requestedFactors: pcaFactors)
+                                         rotation: pcaRotation, requestedFactors: pcaFactors,
+                                         jackknife: runPCAJackknife)
                 } label: { Label("Run", systemImage: "waveform.path.ecg.rectangle") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.pcaRunning)
@@ -381,6 +387,9 @@ struct PCAView: View {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let pcaModel = model.pcaModel {
                 TemporalPCAView(model: pcaModel)
+                if let jackknife = pcaModel.jackknife {
+                    jackknifeSummary(jackknife, title: "Temporal jackknife")
+                }
             } else {
                 Text("Run to plot temporal factor loadings.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -404,6 +413,46 @@ struct PCAView: View {
             Text(progress.stage.isEmpty ? "Working…" : progress.stage)
                 .font(.caption).foregroundStyle(.secondary)
                 .monospacedDigit()
+        }
+    }
+
+    private func jackknifeSummary(_ jackknife: PCAJackknifeResult, title: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption.weight(.semibold))
+            Text(String(format: "%d subject-drop refits · mean loading SD %.4f · max loading SD %.4f",
+                        jackknife.succeeded, jackknife.meanLoadingSD, jackknife.maxLoadingSD))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !jackknife.failures.isEmpty {
+                Text("Skipped \(jackknife.failures.count) refit\(jackknife.failures.count == 1 ? "" : "s"): "
+                     + jackknife.failures.joined(separator: "; "))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(3)
+            }
+        }
+        .padding(8)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func dualJackknifeSummary(_ jackknife: TwoStepPCAJackknifeResult?) -> some View {
+        if let jackknife {
+            VStack(alignment: .leading, spacing: 6) {
+                if let first = jackknife.first {
+                    jackknifeSummary(first, title: "First-step temporal jackknife")
+                }
+                let second = jackknife.second.enumerated().compactMap { index, item -> String? in
+                    guard let item else { return nil }
+                    return String(format: "TF%d spatial: mean SD %.4f, max SD %.4f",
+                                  index + 1, item.meanLoadingSD, item.maxLoadingSD)
+                }
+                if !second.isEmpty {
+                    Text(second.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -447,6 +496,9 @@ struct PCAView: View {
                     Text("Varimax").tag(PCARotation.varimax)
                 }
                 .fixedSize()
+                Toggle("Jackknife LOO", isOn: $runDualJackknife)
+                    .toggleStyle(.checkbox)
+                    .help("Reruns the dual PCA once per subject dropped for first-step and second-step loading stability.")
                 Button {
                     model.runSpatialScree(members: members, conditionNames: conditionNames,
                                           timeIndices: currentTimeAxis()?.indices,
@@ -460,6 +512,9 @@ struct PCAView: View {
                                      timeIndices: axis?.indices, timesMS: axis?.timesMS ?? [],
                                      firstRotation: pcaRotation, secondRotation: dualSecondRotation,
                                      firstFactors: pcaFactors, spatialFactors: dualSpatialFactors,
+                                     jackknife: runDualJackknife,
+                                     factorNames: study.factors.map(\.name),
+                                     conditionMetadata: study.conditionMetadata(for: conditionNames),
                                      sensorLayout: groupSensorLayout, groupID: groupID,
                                      groupLabel: title, store: analysis)
                 } label: { Label("Run Dual PCA", systemImage: "square.stack.3d.up") }
@@ -477,6 +532,7 @@ struct PCAView: View {
                         Text("Combined factors").font(.subheadline.weight(.semibold))
                         if let dualModel = model.dualModel {
                             CombinedFactorsTable(result: dualModel)
+                            dualJackknifeSummary(dualModel.jackknife)
                         } else {
                             Text("Run the dual PCA to see combined-factor variance.")
                                 .font(.caption).foregroundStyle(.secondary)

@@ -22,6 +22,7 @@ struct DualPCAView: View {
 
     @Environment(AnalysisStore.self) private var store
     @State private var selectedFactorID: String?
+    @State private var reconstructionScope: AnalysisStore.DerivedReconstructionScope = .fullFactor
 
     private var threshold: Double { store.spatialThreshold }
 
@@ -87,6 +88,36 @@ struct DualPCAView: View {
                         }
                     )
 
+                    if let factor = selectedFactor {
+                        HStack {
+                            Label("Selected \(factor.name)", systemImage: "target")
+                                .font(.caption.weight(.semibold))
+                            Spacer()
+                            Picker("Reconstruct", selection: $reconstructionScope) {
+                                ForEach(AnalysisStore.DerivedReconstructionScope.allCases) { scope in
+                                    Text(scope.rawValue).tag(scope)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .fixedSize()
+                            .help("Full factor keeps all channels. Selected electrodes keeps only channels at or above the current spatial-loading threshold.")
+                            Button {
+                                if let bundle = store.dual {
+                                    _ = store.addReconstructedFactorDerivedData(
+                                        from: bundle,
+                                        factor: factor,
+                                        scope: reconstructionScope,
+                                        threshold: threshold
+                                    )
+                                }
+                            } label: {
+                                Label("Send to Decoding / Classification", systemImage: "checkerboard.shield")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(reconstructionScope == .selectedElectrodes && selectedChannelCount(factor) == 0)
+                        }
+                    }
+
                     if let factor = selectedFactor, !clusterSubjects.isEmpty {
                         Divider()
                         ClusterERPView(
@@ -106,6 +137,10 @@ struct DualPCAView: View {
                 }
             }
         }
+    }
+
+    private func selectedChannelCount(_ factor: TwoStepFactor) -> Int {
+        spatialLoading(factor).filter { abs($0) >= threshold }.count
     }
 }
 

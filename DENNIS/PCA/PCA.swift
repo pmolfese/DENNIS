@@ -48,6 +48,26 @@ nonisolated struct PCAResult {
     let nFactors: Int
 }
 
+nonisolated struct PCAJackknifeResult: Sendable {
+    let subjectNames: [String]
+    /// Variable × factor mean loading after congruence/sign alignment.
+    let loadingMean: Matrix
+    /// Variable × factor leave-one-subject-out loading standard deviation.
+    let loadingSD: Matrix
+    /// Mean of each PCA run's per-variable SD vector.
+    let variableSDMean: [Double]
+    /// Leave-one-subject-out SD of the PCA variable SD vector.
+    let variableSDSD: [Double]
+    let succeeded: Int
+    let failures: [String]
+
+    var maxLoadingSD: Double { loadingSD.grid.max() ?? 0 }
+    var meanLoadingSD: Double {
+        guard !loadingSD.grid.isEmpty else { return 0 }
+        return loadingSD.grid.reduce(0, +) / Double(loadingSD.grid.count)
+    }
+}
+
 nonisolated enum PCAError: Error, LocalizedError {
     case noGoodVariables
     case tooMuchBadData
@@ -312,5 +332,157 @@ nonisolated enum PCACore {
             result[c] = acc / denom
         }
         return result
+    }
+}
+
+nonisolated enum PCAJackknife {
+    static func leaveOneSubjectOut(
+        tensor: EPTensor,
+        mode: PCAMode,
+        fullResult: PCAResult,
+        subjectNames: [String],
+        rotation: PCARotation,
+        nFactors: Int,
+        matrixType: PCAMatrixType = .cov,
+        loading: PCALoading = .kaiser,
+        rotopt: Double = 3,
+        seed: UInt64 = 0,
+        report: PCAProgressHandler? = nil,
+        progressRange: ClosedRange<Double> = 0...1
+    ) throws -> PCAJackknifeResult {
+        let nSubjects = tensor.nSubjects
+        guard nSubjects > 1 else { throw PCAError.tooFewObservations(needed: 2, have: nSubjects) }
+
+        var alignedPatterns: [Matrix] = []
+        var variableSDs: [[Double]] = []
+        var keptNames: [String] = []
+        var failures: [String] = []
+
+        for heldOut in 0..<nSubjects {
+            let name = subjectNames.indices.contains(heldOut) ? subjectNames[heldOut] : "Subject \(heldOut + 1)"
+            let fraction = progressRange.lowerBound
+                + (progressRange.upperBound - progressRange.lowerBound) * Double(heldOut) / Double(nSubjects)
+            report?(fraction, "Jackknife \(heldOut + 1)/\(nSubjects): refitting PCA without \(name)")
+            do {
+                let indices = (0..<nSubjects).filter { $0 != heldOut }
+                let subset = tensor.selectingSubjects(indices)
+                let result = try PCACore.doPCA(
+                    subset.reshape(forMode: mode),
+                    mode: mode,
+                    rotation: rotation,
+                    nFactors: min(nFactors, subset.variableCount(for: mode)),
+                    matrixType: matrixType,
+                    loading: loading,
+                    rotopt: rotopt,
+                    seed: seed
+                )
+                alignedPatterns.append(align(result.pattern, to: fullResult.pattern))
+                variableSDs.append(result.variableSD)
+                keptNames.append(name)
+            } catch {
+                failures.append("\(name): \((error as? LocalizedError)?.errorDescription ?? String(describing: error))")
+            }
+        }
+
+        guard let first = alignedPatterns.first else { throw PCAError.tooMuchBadData }
+        let loadingMean = meanMatrix(alignedPatterns, rows: first.rows, cols: first.cols)
+        let loadingSD = sdMatrix(alignedPatterns, mean: loadingMean)
+        let sdLength = variableSDs.map(\.count).min() ?? 0
+        let variableSDMean = meanVectors(variableSDs.map { Array($0.prefix(sdLength)) }, length: sdLength)
+        let variableSDSD = sdVectors(variableSDs.map { Array($0.prefix(sdLength)) }, mean: variableSDMean)
+
+        report?(progressRange.upperBound, "Jackknife complete: \(alignedPatterns.count) leave-one-subject-out PCA refits.")
+        return PCAJackknifeResult(
+            subjectNames: keptNames,
+            loadingMean: loadingMean,
+            loadingSD: loadingSD,
+            variableSDMean: variableSDMean,
+            variableSDSD: variableSDSD,
+            succeeded: alignedPatterns.count,
+            failures: failures
+        )
+    }
+
+    private static func align(_ candidate: Matrix, to reference: Matrix) -> Matrix {
+        guard candidate.rows == reference.rows, candidate.cols == reference.cols else { return candidate }
+        var out = Matrix(rows: candidate.rows, cols: candidate.cols)
+        var used = Set<Int>()
+        for refCol in 0..<reference.cols {
+            var bestCol = 0
+            var bestScore = -Double.infinity
+            var bestSign = 1.0
+            for candCol in 0..<candidate.cols where !used.contains(candCol) {
+                let score = congruence(reference, refCol, candidate, candCol)
+                if abs(score) > bestScore {
+                    bestScore = abs(score)
+                    bestCol = candCol
+                    bestSign = score < 0 ? -1 : 1
+                }
+            }
+            used.insert(bestCol)
+            for r in 0..<candidate.rows { out[r, refCol] = candidate[r, bestCol] * bestSign }
+        }
+        return out
+    }
+
+    private static func congruence(_ a: Matrix, _ ac: Int, _ b: Matrix, _ bc: Int) -> Double {
+        var dot = 0.0
+        var aa = 0.0
+        var bb = 0.0
+        for r in 0..<a.rows {
+            let av = a[r, ac]
+            let bv = b[r, bc]
+            dot += av * bv
+            aa += av * av
+            bb += bv * bv
+        }
+        guard aa > 0, bb > 0 else { return 0 }
+        return dot / (aa.squareRoot() * bb.squareRoot())
+    }
+
+    private static func meanMatrix(_ matrices: [Matrix], rows: Int, cols: Int) -> Matrix {
+        var out = Matrix(rows: rows, cols: cols)
+        guard !matrices.isEmpty else { return out }
+        for matrix in matrices {
+            for i in 0..<out.grid.count { out.grid[i] += matrix.grid[i] }
+        }
+        for i in 0..<out.grid.count { out.grid[i] /= Double(matrices.count) }
+        return out
+    }
+
+    private static func sdMatrix(_ matrices: [Matrix], mean: Matrix) -> Matrix {
+        var out = Matrix(rows: mean.rows, cols: mean.cols)
+        guard matrices.count > 1 else { return out }
+        for matrix in matrices {
+            for i in 0..<out.grid.count {
+                let d = matrix.grid[i] - mean.grid[i]
+                out.grid[i] += d * d
+            }
+        }
+        for i in 0..<out.grid.count { out.grid[i] = (out.grid[i] / Double(matrices.count - 1)).squareRoot() }
+        return out
+    }
+
+    private static func meanVectors(_ vectors: [[Double]], length: Int) -> [Double] {
+        guard !vectors.isEmpty, length > 0 else { return [] }
+        var out = [Double](repeating: 0, count: length)
+        for vector in vectors {
+            for i in 0..<length { out[i] += vector[i] }
+        }
+        for i in 0..<length { out[i] /= Double(vectors.count) }
+        return out
+    }
+
+    private static func sdVectors(_ vectors: [[Double]], mean: [Double]) -> [Double] {
+        guard vectors.count > 1, !mean.isEmpty else { return [Double](repeating: 0, count: mean.count) }
+        var out = [Double](repeating: 0, count: mean.count)
+        for vector in vectors {
+            for i in 0..<mean.count {
+                let d = vector[i] - mean[i]
+                out[i] += d * d
+            }
+        }
+        for i in 0..<out.count { out[i] = (out[i] / Double(vectors.count - 1)).squareRoot() }
+        return out
     }
 }

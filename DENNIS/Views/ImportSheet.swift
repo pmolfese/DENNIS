@@ -53,9 +53,28 @@ struct ImportSheet: View {
             HStack(spacing: 8) {
                 ForEach(plan.factorNames.indices, id: \.self) { index in
                     HStack(spacing: 2) {
+                        Button {
+                            moveFactor(from: index, to: index - 1)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(index == 0)
+                        .help("Move factor left")
+
                         TextField("Factor \(index + 1)", text: factorBinding(index))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 130)
+
+                        Button {
+                            moveFactor(from: index, to: index + 1)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(index == plan.factorNames.count - 1)
+                        .help("Move factor right")
+
                         if plan.factorNames.count > 1 {
                             Button {
                                 removeFactor(at: index)
@@ -178,6 +197,19 @@ struct ImportSheet: View {
         plan.factorNames.remove(at: index)
         for candidate in plan.candidates where index < candidate.levels.count {
             candidate.levels.remove(at: index)
+        }
+    }
+
+    private func moveFactor(from source: Int, to destination: Int) {
+        guard plan.factorNames.indices.contains(source),
+              plan.factorNames.indices.contains(destination),
+              source != destination else { return }
+        let name = plan.factorNames.remove(at: source)
+        plan.factorNames.insert(name, at: destination)
+        for candidate in plan.candidates {
+            guard candidate.levels.indices.contains(source) else { continue }
+            let value = candidate.levels.remove(at: source)
+            candidate.levels.insert(value, at: min(destination, candidate.levels.count))
         }
     }
 }

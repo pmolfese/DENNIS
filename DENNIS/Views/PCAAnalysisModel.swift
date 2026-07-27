@@ -123,13 +123,15 @@ final class PCAAnalysisModel {
 
     func runTemporalPCA(members: [Dataset], conditionNames: [String],
                         timeIndices: [Int]?, timesMS: [Double],
-                        rotation: PCARotation, requestedFactors: Int) {
+                        rotation: PCARotation, requestedFactors: Int,
+                        jackknife: Bool) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             pcaModel = nil
             pcaError = "No dimension-consistent loaded data to analyze yet."
             return
         }
         let input = snapshot.input
+        let subjectNames = snapshot.subjects.map(\.name)
         let report = pcaProgress.handler()
         pcaProgress.reset()
         pcaRunning = true
@@ -146,7 +148,22 @@ final class PCAAnalysisModel {
                     matrix, mode: .temporal, rotation: rotation, nFactors: nFactors,
                     report: report
                 )
-                outcome = .success(TemporalPCAResult(result: result, timesMS: timesMS))
+                let stability: PCAJackknifeResult?
+                if jackknife {
+                    stability = try PCAJackknife.leaveOneSubjectOut(
+                        tensor: tensor,
+                        mode: .temporal,
+                        fullResult: result,
+                        subjectNames: subjectNames,
+                        rotation: rotation,
+                        nFactors: nFactors,
+                        report: report,
+                        progressRange: 0.92...1.0
+                    )
+                } else {
+                    stability = nil
+                }
+                outcome = .success(TemporalPCAResult(result: result, timesMS: timesMS, jackknife: stability))
             } catch {
                 outcome = .failure(error)
             }
@@ -207,6 +224,8 @@ final class PCAAnalysisModel {
                     timeIndices: [Int]?, timesMS: [Double],
                     firstRotation: PCARotation, secondRotation: PCARotation,
                     firstFactors: Int, spatialFactors: Int,
+                    jackknife: Bool,
+                    factorNames: [String], conditionMetadata: ConditionModeMetadata,
                     sensorLayout: SensorLayout?, groupID: String, groupLabel: String,
                     store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
@@ -229,12 +248,35 @@ final class PCAAnalysisModel {
             do {
                 report(0.02, "Assembling data tensor")
                 let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
-                let result = try TwoStepPCA.run(
+                let baseResult = try TwoStepPCA.run(
                     tensor: tensor, firstMode: .temporal, secondMode: .spatial,
                     firstFactors: firstFactors, secondFactors: spatialFactors,
                     firstRotation: firstRotation, secondRotation: secondRotation,
                     firstTimesMS: timesMS, report: report
                 )
+                let result: TwoStepPCAResult
+                if jackknife {
+                    let stability = TwoStepPCA.jackknife(
+                        tensor: tensor,
+                        result: baseResult,
+                        subjectNames: subjectNames,
+                        firstRotation: firstRotation,
+                        secondRotation: secondRotation,
+                        report: report
+                    )
+                    result = TwoStepPCAResult(
+                        first: baseResult.first,
+                        second: baseResult.second,
+                        firstMode: baseResult.firstMode,
+                        secondMode: baseResult.secondMode,
+                        factors: baseResult.factors,
+                        totalVariance: baseResult.totalVariance,
+                        firstTimesMS: baseResult.firstTimesMS,
+                        jackknife: stability
+                    )
+                } else {
+                    result = baseResult
+                }
                 outcome = .success(result)
             } catch {
                 outcome = .failure(error)
@@ -247,7 +289,12 @@ final class PCAAnalysisModel {
                     store.dual = AnalysisStore.DualBundle(
                         result: model, groupID: groupID, groupLabel: groupLabel,
                         conditionNames: conditionNames, subjectNames: subjectNames,
-                        sensorLayout: sensorLayout, nChannels: nChannels
+                        subjectLevels: snapshot.subjects.map(\.levels),
+                        factorNames: factorNames,
+                        conditionMetadata: conditionMetadata,
+                        sensorLayout: sensorLayout, nChannels: nChannels,
+                        samplingRate: clusterData.samplingRate,
+                        baselineSamples: clusterData.baseline
                     )
                     self.clusterSubjects = clusterData.subjects
                     self.clusterBaseline = clusterData.baseline

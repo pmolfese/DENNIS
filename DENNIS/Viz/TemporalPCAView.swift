@@ -18,6 +18,13 @@ nonisolated struct TemporalPCAResult {
     let result: PCAResult
     /// Time in ms for each variable (row of `pattern`).
     let timesMS: [Double]
+    let jackknife: PCAJackknifeResult?
+
+    init(result: PCAResult, timesMS: [Double], jackknife: PCAJackknifeResult? = nil) {
+        self.result = result
+        self.timesMS = timesMS
+        self.jackknife = jackknife
+    }
 }
 
 struct TemporalPCAView: View {

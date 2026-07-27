@@ -34,6 +34,13 @@ nonisolated struct TwoStepPCAResult: Sendable {
     let totalVariance: Double
     /// Time (ms) per first-step variable, when the first mode is temporal.
     let firstTimesMS: [Double]
+    let jackknife: TwoStepPCAJackknifeResult?
+}
+
+nonisolated struct TwoStepPCAJackknifeResult: Sendable {
+    let first: PCAJackknifeResult?
+    /// Second-step jackknife summaries, aligned with `TwoStepPCAResult.second`.
+    let second: [PCAJackknifeResult?]
 }
 
 nonisolated enum TwoStepPCA {
@@ -51,6 +58,7 @@ nonisolated enum TwoStepPCA {
         rotopt: Double = 3,
         seed: UInt64 = 0,
         firstTimesMS: [Double] = [],
+        jackknife: TwoStepPCAJackknifeResult? = nil,
         report: PCAProgressHandler? = nil
     ) throws -> TwoStepPCAResult {
         precondition(firstMode != secondMode, "two-step modes must differ")
@@ -97,7 +105,68 @@ nonisolated enum TwoStepPCA {
             firstMode: firstMode, secondMode: secondMode,
             factors: factors,
             totalVariance: factors.reduce(0) { $0 + $1.variance },
-            firstTimesMS: firstTimesMS
+            firstTimesMS: firstTimesMS,
+            jackknife: jackknife
         )
+    }
+
+    static func jackknife(
+        tensor: EPTensor,
+        result: TwoStepPCAResult,
+        subjectNames: [String],
+        firstRotation: PCARotation = .promax,
+        secondRotation: PCARotation = .promax,
+        matrixType: PCAMatrixType = .cov,
+        loading: PCALoading = .kaiser,
+        rotopt: Double = 3,
+        seed: UInt64 = 0,
+        report: PCAProgressHandler? = nil
+    ) -> TwoStepPCAJackknifeResult {
+        let firstRange = 0.0...0.35
+        let firstJackknife = try? PCAJackknife.leaveOneSubjectOut(
+            tensor: tensor,
+            mode: result.firstMode,
+            fullResult: result.first,
+            subjectNames: subjectNames,
+            rotation: firstRotation,
+            nFactors: result.first.nFactors,
+            matrixType: matrixType,
+            loading: loading,
+            rotopt: rotopt,
+            seed: seed,
+            report: report,
+            progressRange: firstRange
+        )
+
+        var scoreDims = tensor.dims
+        scoreDims[EPTensor.variableAxis(for: result.firstMode)] = 1
+        var secondJackknife: [PCAJackknifeResult?] = []
+
+        for t in 0..<result.first.nFactors {
+            let start = 0.35 + 0.65 * Double(t) / Double(max(result.first.nFactors, 1))
+            let end = 0.35 + 0.65 * Double(t + 1) / Double(max(result.first.nFactors, 1))
+            let scoreTensor = EPTensor(dims: scoreDims, data: result.first.scores.column(t))
+            let fullSecond = result.second.indices.contains(t) ? result.second[t] : nil
+            let jack = fullSecond.flatMap { full in
+                try? PCAJackknife.leaveOneSubjectOut(
+                    tensor: scoreTensor,
+                    mode: result.secondMode,
+                    fullResult: full,
+                    subjectNames: subjectNames,
+                    rotation: secondRotation,
+                    nFactors: full.nFactors,
+                    matrixType: matrixType,
+                    loading: loading,
+                    rotopt: rotopt,
+                    seed: seed,
+                    report: report,
+                    progressRange: start...end
+                )
+            }
+            secondJackknife.append(jack)
+        }
+
+        report?(1.0, "Dual PCA jackknife complete.")
+        return TwoStepPCAJackknifeResult(first: firstJackknife, second: secondJackknife)
     }
 }

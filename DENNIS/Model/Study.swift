@@ -179,6 +179,30 @@ final class Study {
         invalidateDerivedCache()
     }
 
+    /// Replace the between-subject design without touching loaded signal data.
+    /// This is the commit point for the design editor: factor names define the
+    /// sidebar nesting order, and each dataset's levels place it in that tree.
+    @MainActor
+    func applyDesignAssignment(factorNames: [String], levelsByDatasetID: [UUID: [String]]) {
+        let cleanedNames = factorNames.enumerated().map { index, name in
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Factor \(index + 1)" : trimmed
+        }
+        factors = cleanedNames.map(DesignFactor.init(name:))
+        for dataset in datasets {
+            let sourceLevels = levelsByDatasetID[dataset.id] ?? dataset.levels
+            dataset.levels = normalizedLevels(sourceLevels, count: cleanedNames.count)
+        }
+        invalidateDerivedCache()
+    }
+
+    @MainActor
+    func applyDesignAssignment(_ plan: DesignAssignmentPlan) {
+        plan.normalizeWidths()
+        let levels = Dictionary(uniqueKeysWithValues: plan.rows.map { ($0.datasetID, $0.levels) })
+        applyDesignAssignment(factorNames: plan.factorNames, levelsByDatasetID: levels)
+    }
+
     // MARK: - Conditions (categories)
 
     /// The union of all condition (category) names across every dataset, in
@@ -433,6 +457,12 @@ final class Study {
         groupMembersCache.removeAll(keepingCapacity: true)
         childGroupsCache.removeAll(keepingCapacity: true)
         sharedConditionsCache.removeAll(keepingCapacity: true)
+    }
+
+    private func normalizedLevels(_ levels: [String], count: Int) -> [String] {
+        if levels.count == count { return levels }
+        if levels.count > count { return Array(levels.prefix(count)) }
+        return levels + Array(repeating: "", count: count - levels.count)
     }
 
     private func buildNodes(datasets: [Dataset], depth: Int, pathPrefix: String) -> [GroupNode] {
