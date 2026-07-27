@@ -105,10 +105,11 @@ struct SidebarView: View {
         panel.nameFieldStringValue = "\(safeFileStem(item.name)).csv"
         panel.allowedContentTypes = [.commaSeparatedText, .plainText]
         panel.canCreateDirectories = true
-        panel.accessoryView = formatAccessoryView()
+        panel.accessoryView = exportAccessoryView(item: item)
 
         guard panel.runModal() == .OK, var url = panel.url else { return }
         let format = selectedExportFormat(from: panel.accessoryView)
+        let units = selectedExportUnits(from: panel.accessoryView)
         if url.pathExtension.lowercased() != format.fileExtension {
             url.deletePathExtension()
             url.appendPathExtension(format.fileExtension)
@@ -117,7 +118,7 @@ struct SidebarView: View {
         let snapshot = DerivedDataExporter.Snapshot(item: item)
         Task.detached(priority: .utility) {
             do {
-                try DerivedDataExporter.write(snapshot, format: format, to: url)
+                try DerivedDataExporter.write(snapshot, format: format, units: units, to: url)
             } catch {
                 await MainActor.run {
                     _ = NSAlert(error: error).runModal()
@@ -126,20 +127,39 @@ struct SidebarView: View {
         }
     }
 
-    private func formatAccessoryView() -> NSView {
+    private func exportAccessoryView(item: AnalysisStore.DerivedDataItem) -> NSView {
         let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
+        stack.orientation = .vertical
+        stack.alignment = .leading
         stack.spacing = 8
 
+        let formatRow = NSStackView()
+        formatRow.orientation = .horizontal
+        formatRow.alignment = .centerY
+        formatRow.spacing = 8
         let label = NSTextField(labelWithString: "Format:")
         let popup = NSPopUpButton()
         popup.addItems(withTitles: DerivedDataExporter.Format.allCases.map(\.rawValue))
         popup.selectItem(withTitle: DerivedDataExporter.Format.csv.rawValue)
         popup.identifier = NSUserInterfaceItemIdentifier("DerivedDataExportFormat")
+        formatRow.addArrangedSubview(label)
+        formatRow.addArrangedSubview(popup)
 
-        stack.addArrangedSubview(label)
-        stack.addArrangedSubview(popup)
+        let unitsRow = NSStackView()
+        unitsRow.orientation = .horizontal
+        unitsRow.alignment = .centerY
+        unitsRow.spacing = 8
+        let unitsLabel = NSTextField(labelWithString: "Units:")
+        let unitsPopup = NSPopUpButton()
+        unitsPopup.addItems(withTitles: DerivedDataExporter.Units.allCases.map(\.label))
+        let defaultUnits: DerivedDataExporter.Units = item.nativeUnit == .microvolts || item.microvoltScale != nil ? .microvolts : .native
+        unitsPopup.selectItem(withTitle: defaultUnits.label)
+        unitsPopup.identifier = NSUserInterfaceItemIdentifier("DerivedDataExportUnits")
+        unitsRow.addArrangedSubview(unitsLabel)
+        unitsRow.addArrangedSubview(unitsPopup)
+
+        stack.addArrangedSubview(formatRow)
+        stack.addArrangedSubview(unitsRow)
         return stack
     }
 
@@ -152,6 +172,15 @@ struct SidebarView: View {
         return format
     }
 
+    private func selectedExportUnits(from view: NSView?) -> DerivedDataExporter.Units {
+        guard let popup = findUnitsPopup(in: view),
+              let title = popup.selectedItem?.title,
+              let units = DerivedDataExporter.Units.allCases.first(where: { $0.label == title }) else {
+            return .microvolts
+        }
+        return units
+    }
+
     private func findFormatPopup(in view: NSView?) -> NSPopUpButton? {
         guard let view else { return nil }
         if let popup = view as? NSPopUpButton,
@@ -160,6 +189,18 @@ struct SidebarView: View {
         }
         for child in view.subviews {
             if let match = findFormatPopup(in: child) { return match }
+        }
+        return nil
+    }
+
+    private func findUnitsPopup(in view: NSView?) -> NSPopUpButton? {
+        guard let view else { return nil }
+        if let popup = view as? NSPopUpButton,
+           popup.identifier?.rawValue == "DerivedDataExportUnits" {
+            return popup
+        }
+        for child in view.subviews {
+            if let match = findUnitsPopup(in: child) { return match }
         }
         return nil
     }

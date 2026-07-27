@@ -47,6 +47,7 @@ struct DecodingView: View {
     private var derivedItem: AnalysisStore.DerivedDataItem? {
         if case .derived(let id) = source { store.derivedItem(id: id) } else { nil }
     }
+    private var isDerivedSource: Bool { derivedItem != nil }
     private var members: [Dataset] { groupID.map { study.datasets(inGroupID: $0) } ?? [] }
     private var conditionNames: [String] { derivedItem?.conditionNames ?? groupID.map { study.sharedConditionNames(inGroupID: $0) } ?? [] }
     private var conditionMetadata: ConditionModeMetadata { derivedItem?.conditionMetadata ?? study.conditionMetadata(for: conditionNames) }
@@ -145,11 +146,23 @@ struct DecodingView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("\(title) · decoding").font(.largeTitle.bold())
-            Text(summary)
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(title) · decoding").font(.largeTitle.bold())
+                Text(summary)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if isDerivedSource {
+                    Text("Derived PCA data uses its full stored time axis at native sample density.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            if let preview = derivedItem?.factorPreview {
+                DerivedFactorPreviewView(preview: preview)
+                    .frame(width: 420, height: 210)
+            }
         }
     }
 
@@ -231,19 +244,24 @@ struct DecodingView: View {
                         TextField("pre", value: $trimPre, format: .number)
                             .frame(width: 66)
                             .textFieldStyle(.roundedBorder)
+                            .disabled(isDerivedSource)
                         Text("to").foregroundStyle(.secondary)
                         TextField("post", value: $trimPost, format: .number)
                             .frame(width: 66)
                             .textFieldStyle(.roundedBorder)
+                            .disabled(isDerivedSource)
                         Text("ms").foregroundStyle(.secondary)
                     }
                 }
+                .opacity(isDerivedSource ? 0.5 : 1)
 
                 VStack(alignment: .leading, spacing: 6) {
                     fieldLabel("Downsample", help: .downsample)
                     Stepper("x\(downsample)", value: $downsample, in: 1...32)
                         .fixedSize()
+                        .disabled(isDerivedSource)
                 }
+                .opacity(isDerivedSource ? 0.5 : 1)
             }
 
             HStack(alignment: .lastTextBaseline, spacing: 16) {
@@ -441,7 +459,8 @@ struct DecodingView: View {
             if !samples.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Decoding Overlay Butterfly").font(.headline)
+                        Text(derivedItem == nil ? "Decoding Overlay Butterfly" : "Decoding Overlay Component Butterfly")
+                            .font(.headline)
                         Spacer()
                         HStack(spacing: 12) {
                             Label("above chance", systemImage: "square.fill")
@@ -455,7 +474,8 @@ struct DecodingView: View {
                         samples: samples,
                         samplingRate: input.samplingRate,
                         baselineSamples: input.baselineSamples,
-                        windows: windows
+                        windows: windows,
+                        amplitudeUnit: derivedItem == nil ? "µV" : "component units"
                     )
                     .frame(minHeight: 230)
                 }
@@ -582,7 +602,10 @@ struct DecodingView: View {
     }
 
     private func currentTimeAxis(_ input: EPTensor.Input) -> EPTensor.TimeAxis? {
-        EPTensor.selectTimeSamples(
+        if isDerivedSource {
+            return EPTensor.TimeAxis(indices: Array(0..<input.nTimes), timesMS: fullTimesMS(input))
+        }
+        return EPTensor.selectTimeSamples(
             samplingRate: input.samplingRate,
             baselineSamples: input.baselineSamples,
             nTimes: input.nTimes,
@@ -604,7 +627,9 @@ struct DecodingView: View {
             return
         }
         progressFraction = 0.04
-        progressStatus = "Selecting ERP samples from \(trimPre.formatted()) to \(trimPost.formatted()) ms with downsample x\(downsample)."
+        progressStatus = isDerivedSource
+            ? "Using the complete derived PCA tensor with all stored time samples at native density."
+            : "Selecting ERP samples from \(trimPre.formatted()) to \(trimPost.formatted()) ms with downsample x\(downsample)."
         guard let axis = currentTimeAxis(input), !axis.indices.isEmpty else {
             error = "The selected time window contains no samples."
             return
@@ -975,11 +1000,98 @@ private struct DecodingHelpButton: View {
     }
 }
 
+private struct DerivedFactorPreviewView: View {
+    let preview: AnalysisStore.DerivedDataItem.FactorPreview
+
+    private var temporalPoints: [TemporalPoint] {
+        preview.temporalLoading.enumerated().map { index, value in
+            TemporalPoint(
+                id: index,
+                time: preview.temporalTimesMS.indices.contains(index) ? preview.temporalTimesMS[index] : Double(index),
+                value: value
+            )
+        }
+    }
+
+    private var spatialValues: [Double] {
+        guard let indices = preview.channelIndices else { return preview.spatialLoading }
+        let count = max((preview.sensorLayout?.positions.map(\.channelIndex).max() ?? -1) + 1,
+                        (indices.max() ?? -1) + 1,
+                        preview.spatialLoading.count)
+        var values = Array(repeating: 0.0, count: count)
+        for source in indices where source < preview.spatialLoading.count && source < values.count {
+            values[source] = preview.spatialLoading[source]
+        }
+        return values
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(preview.factorName)
+                    .font(.headline.monospaced())
+                Spacer()
+                Text(String(format: "%.1f%%", preview.variance * 100))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Temporal loading")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Chart(temporalPoints) { point in
+                        LineMark(
+                            x: .value("Time", point.time),
+                            y: .value("Loading", point.value)
+                        )
+                        .foregroundStyle(.blue)
+                        RuleMark(y: .value("Zero", 0))
+                            .foregroundStyle(.secondary.opacity(0.35))
+                            .lineStyle(StrokeStyle(lineWidth: 0.75))
+                    }
+                    .chartXAxisLabel("ms")
+                    .chartYAxis(.hidden)
+                    .frame(minWidth: 210, minHeight: 135)
+                }
+                if let layout = preview.sensorLayout {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Spatial loading")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        TopomapView(
+                            layout: layout,
+                            values: spatialValues,
+                            timeSeconds: 0,
+                            fixedScale: nil,
+                            showsHeader: false,
+                            interpolationStep: 8,
+                            canvasMinHeight: 112,
+                            highlightThreshold: nil
+                        )
+                        .frame(width: 150, height: 135)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2)))
+    }
+
+    private struct TemporalPoint: Identifiable {
+        let id: Int
+        let time: Double
+        let value: Double
+    }
+}
+
 private struct DecodingButterflyOverlayView: View {
     let samples: [[Float]]
     let samplingRate: Double
     let baselineSamples: Int
     let windows: [DecodingWindowResult]
+    let amplitudeUnit: String
 
     private var sampleCount: Int { samples.first?.count ?? 0 }
     private var amplitudeBound: Double {
@@ -993,7 +1105,7 @@ private struct DecodingButterflyOverlayView: View {
                 draw(in: &context, size: size)
             }
             .overlay(alignment: .topTrailing) {
-                Text(String(format: "±%.1f µV", amplitudeBound))
+                Text("\(formattedAmplitudeBound) \(amplitudeUnit)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
@@ -1016,6 +1128,13 @@ private struct DecodingButterflyOverlayView: View {
         }
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2)))
+    }
+
+    private var formattedAmplitudeBound: String {
+        if amplitudeBound >= 1 {
+            return String(format: "±%.1f", amplitudeBound)
+        }
+        return String(format: "±%.3g", amplitudeBound)
     }
 
     private func draw(in context: inout GraphicsContext, size: CGSize) {

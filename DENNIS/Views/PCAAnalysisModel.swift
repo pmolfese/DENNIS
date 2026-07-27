@@ -86,7 +86,8 @@ final class PCAAnalysisModel {
     // MARK: - Temporal scree
 
     func runScree(members: [Dataset], conditionNames: [String],
-                  timeIndices: [Int]?, mode: PCAMode) {
+                  timeIndices: [Int]?, mode: PCAMode,
+                  groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             screeAnalysis = nil
             screeError = "No dimension-consistent loaded data to analyze yet."
@@ -109,7 +110,9 @@ final class PCAAnalysisModel {
             await MainActor.run {
                 self.screeRunning = false
                 switch result {
-                case .success(let analysis): self.screeAnalysis = analysis
+                case .success(let analysis):
+                    self.screeAnalysis = analysis
+                    store.updatePCACache(for: groupID) { $0.screeAnalysis = analysis }
                 case .failure(let error):
                     self.screeAnalysis = nil
                     self.screeError = (error as? LocalizedError)?.errorDescription
@@ -124,7 +127,8 @@ final class PCAAnalysisModel {
     func runTemporalPCA(members: [Dataset], conditionNames: [String],
                         timeIndices: [Int]?, timesMS: [Double],
                         rotation: PCARotation, requestedFactors: Int,
-                        jackknife: Bool) {
+                        jackknife: Bool,
+                        groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             pcaModel = nil
             pcaError = "No dimension-consistent loaded data to analyze yet."
@@ -170,7 +174,9 @@ final class PCAAnalysisModel {
             await MainActor.run {
                 self.pcaRunning = false
                 switch outcome {
-                case .success(let model): self.pcaModel = model
+                case .success(let model):
+                    self.pcaModel = model
+                    store.updatePCACache(for: groupID) { $0.pcaModel = model }
                 case .failure(let error):
                     self.pcaModel = nil
                     self.pcaError = (error as? LocalizedError)?.errorDescription
@@ -183,7 +189,8 @@ final class PCAAnalysisModel {
     // MARK: - Dual (two-step) PCA
 
     func runSpatialScree(members: [Dataset], conditionNames: [String],
-                         timeIndices: [Int]?, firstRotation: PCARotation, firstFactors: Int) {
+                         timeIndices: [Int]?, firstRotation: PCARotation, firstFactors: Int,
+                         groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             spatialScree = nil
             spatialScreeError = "No dimension-consistent loaded data to analyze yet."
@@ -210,7 +217,9 @@ final class PCAAnalysisModel {
             await MainActor.run {
                 self.spatialScreeRunning = false
                 switch outcome {
-                case .success(let analysis): self.spatialScree = analysis
+                case .success(let analysis):
+                    self.spatialScree = analysis
+                    store.updatePCACache(for: groupID) { $0.spatialScree = analysis }
                 case .failure(let error):
                     self.spatialScree = nil
                     self.spatialScreeError = (error as? LocalizedError)?.errorDescription
@@ -296,6 +305,7 @@ final class PCAAnalysisModel {
                         samplingRate: clusterData.samplingRate,
                         baselineSamples: clusterData.baseline
                     )
+                    store.updatePCACache(for: groupID) { $0.dualModel = model }
                     self.clusterSubjects = clusterData.subjects
                     self.clusterBaseline = clusterData.baseline
                     self.clusterSamplingRate = clusterData.samplingRate

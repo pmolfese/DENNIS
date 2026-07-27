@@ -89,6 +89,7 @@ nonisolated enum TableDataImporter {
         let channelColumn = index["Channel"]!
         let timeColumn = index["TimeIndex"]!
         let valueColumn = index["Value"]!
+        let unitColumn = index["Unit"]
         let fixedBeforeSubject = 5
         let conditionIndex = index["Condition"]!
         let channelIndex = index["Channel"]!
@@ -110,6 +111,7 @@ nonisolated enum TableDataImporter {
         var kind = AnalysisStore.DerivedKind.reconstructedDualFactor.rawValue
         var sourceGroup = ""
         var selectedFactor = ""
+        var nativeUnit = AnalysisStore.DerivedDataItem.Unit.component
 
         for row in table.rows where !row.isEmpty {
             guard row.indices.contains(valueColumn),
@@ -125,6 +127,9 @@ nonisolated enum TableDataImporter {
             if row.indices.contains(index["Kind"]!), !row[index["Kind"]!].isEmpty { kind = row[index["Kind"]!] }
             if row.indices.contains(index["SourceGroup"]!) { sourceGroup = row[index["SourceGroup"]!] }
             if row.indices.contains(index["SelectedFactor"]!) { selectedFactor = row[index["SelectedFactor"]!] }
+            if let unitColumn, row.indices.contains(unitColumn) {
+                nativeUnit = unit(from: row[unitColumn])
+            }
 
             let subject = row[subjectColumn]
             let subjectIndex = subjectMap[subject] ?? {
@@ -197,8 +202,19 @@ nonisolated enum TableDataImporter {
                 baselineSamples: timing.baselineSamples
             ),
             channelIndices: channelIndices,
+            nativeUnit: nativeUnit,
+            microvoltScale: nil,
+            factorPreview: nil,
             provenance: "Imported from \(url.lastPathComponent)."
         )
+    }
+
+    private static func unit(from raw: String) -> AnalysisStore.DerivedDataItem.Unit {
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cleaned == "µv" || cleaned == "uv" || cleaned.contains("microvolt") {
+            return .microvolts
+        }
+        return .component
     }
 
     private struct CellKey: Hashable {

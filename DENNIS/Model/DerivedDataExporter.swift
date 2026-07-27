@@ -28,6 +28,18 @@ nonisolated enum DerivedDataExporter {
         }
     }
 
+    enum Units: String, CaseIterable, Sendable {
+        case microvolts = "Microvolts"
+        case native = "Native"
+
+        var label: String {
+            switch self {
+            case .microvolts: "Microvolts"
+            case .native: "Native units"
+            }
+        }
+    }
+
     struct Snapshot: Sendable {
         let name: String
         let kind: String
@@ -40,6 +52,8 @@ nonisolated enum DerivedDataExporter {
         let conditionMetadata: ConditionModeMetadata
         let input: EPTensor.Input
         let channelIndices: [Int]?
+        let nativeUnit: AnalysisStore.DerivedDataItem.Unit
+        let microvoltScale: [[Double]]?
 
         init(item: AnalysisStore.DerivedDataItem) {
             name = item.name
@@ -53,16 +67,18 @@ nonisolated enum DerivedDataExporter {
             conditionMetadata = item.conditionMetadata
             input = item.input
             channelIndices = item.channelIndices
+            nativeUnit = item.nativeUnit
+            microvoltScale = item.microvoltScale
         }
     }
 
     static func table(_ item: AnalysisStore.DerivedDataItem, format: Format) -> String {
-        table(Snapshot(item: item), format: format)
+        table(Snapshot(item: item), format: format, units: .native)
     }
 
-    static func table(_ snapshot: Snapshot, format: Format) -> String {
+    static func table(_ snapshot: Snapshot, format: Format, units: Units = .native) -> String {
         var buffer = ""
-        appendTable(snapshot, format: format) { line in
+        appendTable(snapshot, format: format, units: units) { line in
             buffer += line
             buffer += "\n"
         }
@@ -70,7 +86,7 @@ nonisolated enum DerivedDataExporter {
         return buffer
     }
 
-    static func write(_ snapshot: Snapshot, format: Format, to url: URL) throws {
+    static func write(_ snapshot: Snapshot, format: Format, units: Units = .native, to url: URL) throws {
         guard let stream = OutputStream(url: url, append: false) else {
             throw CocoaError(.fileWriteUnknown)
         }
@@ -80,7 +96,7 @@ nonisolated enum DerivedDataExporter {
 
         var chunk = ""
         chunk.reserveCapacity(1_048_576)
-        try appendTable(snapshot, format: format) { line in
+        try appendTable(snapshot, format: format, units: units) { line in
             chunk += line
             chunk += "\n"
             if chunk.utf8.count >= 1_048_576 {
@@ -97,6 +113,7 @@ nonisolated enum DerivedDataExporter {
     private static func appendTable(
         _ snapshot: Snapshot,
         format: Format,
+        units: Units,
         emit: (String) throws -> Void
     ) rethrows {
         let input = snapshot.input
@@ -110,7 +127,7 @@ nonisolated enum DerivedDataExporter {
         headers += snapshot.factorNames
         headers.append("Condition")
         headers += snapshot.conditionMetadata.factorNames
-        headers += ["Channel", "TimeIndex", "Time_ms", "Value"]
+        headers += ["Channel", "TimeIndex", "Time_ms", "Unit", "Value"]
 
         try emit(join(headers, format: format))
         for subjectIndex in 0..<input.subjects.count {
@@ -141,7 +158,8 @@ nonisolated enum DerivedDataExporter {
                             "\(sourceChannel + 1)",
                             "\(timeIndex)",
                             formatNumber(timeMS(index: timeIndex, input: input)),
-                            formatNumber(Double(series[timeIndex]))
+                            outputUnitSymbol(snapshot, units: units),
+                            formatNumber(outputValue(Double(series[timeIndex]), snapshot: snapshot, units: units, channel: channelIndex, time: timeIndex))
                         ]
                         try emit(join(row, format: format))
                     }
@@ -157,6 +175,37 @@ nonisolated enum DerivedDataExporter {
     private static func timeMS(index: Int, input: EPTensor.Input) -> Double {
         guard input.samplingRate > 0 else { return Double(index) }
         return (Double(index) - Double(input.baselineSamples)) / input.samplingRate * 1000
+    }
+
+    private static func outputUnit(_ snapshot: Snapshot, units: Units) -> AnalysisStore.DerivedDataItem.Unit {
+        switch units {
+        case .native:
+            snapshot.nativeUnit
+        case .microvolts:
+            snapshot.microvoltScale == nil && snapshot.nativeUnit != .microvolts ? snapshot.nativeUnit : .microvolts
+        }
+    }
+
+    private static func outputUnitSymbol(_ snapshot: Snapshot, units: Units) -> String {
+        switch outputUnit(snapshot, units: units) {
+        case .component: "component units"
+        case .microvolts: "µV"
+        }
+    }
+
+    private static func outputValue(_ value: Double, snapshot: Snapshot, units: Units, channel: Int, time: Int) -> Double {
+        switch units {
+        case .native:
+            return value
+        case .microvolts:
+            guard snapshot.nativeUnit != .microvolts,
+                  let scale = snapshot.microvoltScale,
+                  channel < scale.count,
+                  time < scale[channel].count else {
+                return value
+            }
+            return value * scale[channel][time]
+        }
     }
 
     private static func join(_ fields: [String], format: Format) -> String {

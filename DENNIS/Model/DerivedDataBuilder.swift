@@ -13,6 +13,8 @@ enum DerivedDataBuilder {
     struct BuiltDerivedInput {
         let input: EPTensor.Input
         let channelIndices: [Int]?
+        let microvoltScale: [[Double]]?
+        let factorPreview: AnalysisStore.DerivedDataItem.FactorPreview?
     }
 
     static func reconstructedDualFactor(
@@ -28,7 +30,9 @@ enum DerivedDataBuilder {
         guard factor.secondIndex < second.pattern.cols else { return nil }
 
         let temporal = result.first.pattern.column(factor.firstIndex)
+        let temporalSD = result.first.variableSD
         let spatial = second.pattern.column(factor.secondIndex)
+        let spatialSD = second.variableSD
         let nChannels = min(bundle.nChannels, spatial.count)
         let nTimes = temporal.count
         let nCells = bundle.conditionNames.count
@@ -74,9 +78,27 @@ enum DerivedDataBuilder {
             samplingRate: bundle.samplingRate,
             baselineSamples: bundle.baselineSamples
         )
+        let scale = sourceChannels.map { sourceChannel in
+            (0..<nTimes).map { time in
+                let s = sourceChannel < spatialSD.count ? spatialSD[sourceChannel] : 1
+                let t = time < temporalSD.count ? temporalSD[time] : 1
+                return s * t
+            }
+        }
+        let preview = AnalysisStore.DerivedDataItem.FactorPreview(
+            factorName: factor.name,
+            temporalLoading: temporal,
+            temporalTimesMS: result.firstTimesMS,
+            spatialLoading: spatial,
+            sensorLayout: bundle.sensorLayout,
+            channelIndices: scope == .fullFactor ? nil : sourceChannels,
+            variance: factor.variance
+        )
         return BuiltDerivedInput(
             input: input,
-            channelIndices: scope == .fullFactor ? nil : sourceChannels
+            channelIndices: scope == .fullFactor ? nil : sourceChannels,
+            microvoltScale: scale,
+            factorPreview: preview
         )
     }
 }

@@ -100,6 +100,25 @@ final class AnalysisStore {
 
     var dual: DualBundle?
 
+    struct PCAResultCache {
+        var screeAnalysis: ScreeAnalysis?
+        var pcaModel: TemporalPCAResult?
+        var dualModel: TwoStepPCAResult?
+        var spatialScree: ScreeAnalysis?
+    }
+
+    var pcaResultsByGroup: [String: PCAResultCache] = [:]
+
+    func pcaCache(for groupID: String) -> PCAResultCache? {
+        pcaResultsByGroup[groupID]
+    }
+
+    func updatePCACache(for groupID: String, _ update: (inout PCAResultCache) -> Void) {
+        var cache = pcaResultsByGroup[groupID] ?? PCAResultCache()
+        update(&cache)
+        pcaResultsByGroup[groupID] = cache
+    }
+
     enum DerivedKind: String, Sendable {
         case reconstructedDualFactor = "PCA reconstructed temporal-spatial factor"
     }
@@ -112,6 +131,29 @@ final class AnalysisStore {
     }
 
     struct DerivedDataItem: Identifiable {
+        enum Unit: String, CaseIterable, Identifiable, Sendable {
+            case component = "Component units"
+            case microvolts = "Microvolts"
+
+            var id: String { rawValue }
+            var symbol: String {
+                switch self {
+                case .component: "component units"
+                case .microvolts: "µV"
+                }
+            }
+        }
+
+        struct FactorPreview: Sendable {
+            let factorName: String
+            let temporalLoading: [Double]
+            let temporalTimesMS: [Double]
+            let spatialLoading: [Double]
+            let sensorLayout: SensorLayout?
+            let channelIndices: [Int]?
+            let variance: Double
+        }
+
         let id: UUID
         let name: String
         let kind: DerivedKind
@@ -127,6 +169,9 @@ final class AnalysisStore {
         /// Original zero-based channel indices represented by `input.channels`.
         /// Nil means channels are unchanged from the source tensor.
         let channelIndices: [Int]?
+        let nativeUnit: Unit
+        let microvoltScale: [[Double]]?
+        let factorPreview: FactorPreview?
         let provenance: String
     }
 
@@ -186,6 +231,9 @@ final class AnalysisStore {
             conditionMetadata: bundle.conditionMetadata,
             input: built.input,
             channelIndices: built.channelIndices,
+            nativeUnit: .component,
+            microvoltScale: built.microvoltScale,
+            factorPreview: built.factorPreview,
             provenance: provenance(for: factor, bundle: bundle, scope: scope, threshold: threshold, channelCount: built.input.nChannels)
         )
         derivedData.removeAll { $0.name == item.name && $0.sourceGroupID == item.sourceGroupID }

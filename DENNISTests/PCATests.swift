@@ -229,6 +229,9 @@ struct PCATests {
                 baselineSamples: 1
             ),
             channelIndices: nil,
+            nativeUnit: .component,
+            microvoltScale: nil,
+            factorPreview: nil,
             provenance: "test"
         )
 
@@ -237,10 +240,49 @@ struct PCATests {
 
         #expect(csv.split(separator: "\n").count == 3)
         #expect(csv.contains("\"Comma, Factor\""))
-        #expect(csv.contains("-1,1.25"))
+        #expect(csv.contains("-1,component units,1.25"))
         #expect(tsv.split(separator: "\n").count == 3)
         #expect(tsv.contains("\tControl\tTarget\tOddball\t"))
-        #expect(tsv.contains("0\t-2.5"))
+        #expect(tsv.contains("0\tcomponent units\t-2.5"))
+    }
+
+    @MainActor
+    @Test func derivedDataExporterCanWriteMicrovoltScaledValues() {
+        let item = AnalysisStore.DerivedDataItem(
+            id: UUID(),
+            name: "Scaled",
+            kind: .reconstructedDualFactor,
+            sourceGroupID: "all",
+            sourceGroupLabel: "All",
+            selectedFactorName: "TF1SF1",
+            conditionNames: ["Target"],
+            subjectNames: ["S1"],
+            subjectLevels: [[]],
+            factorNames: [],
+            conditionMetadata: .empty,
+            input: EPTensor.Input(
+                nChannels: 1,
+                nTimes: 2,
+                conditionCount: 1,
+                subjects: [[[[1, 2]]]],
+                samplingRate: 1000,
+                baselineSamples: 0
+            ),
+            channelIndices: nil,
+            nativeUnit: .component,
+            microvoltScale: [[2, 3]],
+            factorPreview: nil,
+            provenance: "test"
+        )
+
+        let csv = DerivedDataExporter.table(
+            DerivedDataExporter.Snapshot(item: item),
+            format: .csv,
+            units: .microvolts
+        )
+
+        #expect(csv.contains("µV,2"))
+        #expect(csv.contains("µV,6"))
     }
 
     @MainActor
@@ -266,6 +308,9 @@ struct PCATests {
                 baselineSamples: 1
             ),
             channelIndices: [0, 2],
+            nativeUnit: .component,
+            microvoltScale: nil,
+            factorPreview: nil,
             provenance: "test"
         )
         let url = FileManager.default.temporaryDirectory
@@ -283,6 +328,7 @@ struct PCATests {
         #expect(imported.input.samplingRate == 1000)
         #expect(imported.input.baselineSamples == 1)
         #expect(imported.channelIndices == [0, 2])
+        #expect(imported.nativeUnit == .component)
         #expect(imported.input.subjects[0][0][1][1] == 4)
     }
 

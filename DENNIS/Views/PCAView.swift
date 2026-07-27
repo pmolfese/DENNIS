@@ -91,12 +91,7 @@ struct PCAView: View {
         .navigationTitle(title)
         .onAppear {
             topomapSample = cursorSample
-            // Switching app modes (PCA → Stats → PCA) tears down this view and
-            // its @State. The completed dual result still lives in the shared
-            // AnalysisStore, so restore it here when returning to the same group.
-            if model.dualModel == nil, let bundle = analysis.dual, bundle.groupID == groupID {
-                model.dualModel = bundle.result
-            }
+            restoreCachedPCAResults()
             if model.dualModel != nil && model.clusterSubjects.isEmpty {
                 model.prepareClusterERP(members: members, conditionNames: conditionNames)
             }
@@ -251,6 +246,20 @@ struct PCAView: View {
         windowInitialized = true
     }
 
+    private func restoreCachedPCAResults() {
+        if let cache = analysis.pcaCache(for: groupID) {
+            if model.screeAnalysis == nil { model.screeAnalysis = cache.screeAnalysis }
+            if model.pcaModel == nil { model.pcaModel = cache.pcaModel }
+            if model.dualModel == nil { model.dualModel = cache.dualModel }
+            if model.spatialScree == nil { model.spatialScree = cache.spatialScree }
+        }
+        // Older paths and cross-tab consumers already store the latest dual PCA
+        // bundle directly, so keep using it as a fallback for the TFSF maps.
+        if model.dualModel == nil, let bundle = analysis.dual, bundle.groupID == groupID {
+            model.dualModel = bundle.result
+        }
+    }
+
     @ViewBuilder
     private var preprocessingSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -327,7 +336,8 @@ struct PCAView: View {
                 }
                 Button {
                     model.runScree(members: members, conditionNames: conditionNames,
-                                   timeIndices: currentTimeAxis()?.indices, mode: screeMode)
+                                   timeIndices: currentTimeAxis()?.indices, mode: screeMode,
+                                   groupID: groupID, store: analysis)
                 } label: { Label("Run", systemImage: "chart.xyaxis.line") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.screeRunning)
@@ -375,7 +385,8 @@ struct PCAView: View {
                     model.runTemporalPCA(members: members, conditionNames: conditionNames,
                                          timeIndices: axis?.indices, timesMS: axis?.timesMS ?? [],
                                          rotation: pcaRotation, requestedFactors: pcaFactors,
-                                         jackknife: runPCAJackknife)
+                                         jackknife: runPCAJackknife,
+                                         groupID: groupID, store: analysis)
                 } label: { Label("Run", systemImage: "waveform.path.ecg.rectangle") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.pcaRunning)
@@ -502,7 +513,8 @@ struct PCAView: View {
                 Button {
                     model.runSpatialScree(members: members, conditionNames: conditionNames,
                                           timeIndices: currentTimeAxis()?.indices,
-                                          firstRotation: pcaRotation, firstFactors: pcaFactors)
+                                          firstRotation: pcaRotation, firstFactors: pcaFactors,
+                                          groupID: groupID, store: analysis)
                 } label: { Label("Spatial Scree", systemImage: "chart.xyaxis.line") }
                     .buttonStyle(.bordered)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.spatialScreeRunning)
