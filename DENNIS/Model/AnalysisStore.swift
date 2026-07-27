@@ -184,7 +184,38 @@ final class AnalysisStore {
         let rows: [[String]]
     }
 
+    enum BehavioralSubjectKey: String, CaseIterable, Identifiable, Sendable {
+        case exact = "Exact"
+        case caseInsensitive = "Case-insensitive"
+        case fileStem = "Filename stem"
+
+        var id: String { rawValue }
+
+        func normalize(_ value: String) -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch self {
+            case .exact:
+                return trimmed
+            case .caseInsensitive:
+                return trimmed.lowercased()
+            case .fileStem:
+                return URL(fileURLWithPath: trimmed).deletingPathExtension().lastPathComponent.lowercased()
+            }
+        }
+    }
+
+    struct BehavioralLink: Identifiable {
+        let id: UUID
+        let tableID: UUID
+        let subjectColumn: String
+        let keyStrategy: BehavioralSubjectKey
+        let subjectToRow: [String: Int]
+        let unmatchedSubjects: [String]
+        let duplicateKeys: [String]
+    }
+
     var behavioralData: [BehavioralDataItem] = []
+    var behavioralLinks: [BehavioralLink] = []
 
     func derivedItem(id: UUID) -> DerivedDataItem? {
         derivedData.first { $0.id == id }
@@ -192,6 +223,55 @@ final class AnalysisStore {
 
     func behavioralItem(id: UUID) -> BehavioralDataItem? {
         behavioralData.first { $0.id == id }
+    }
+
+    func behavioralLink(tableID: UUID) -> BehavioralLink? {
+        behavioralLinks.last { $0.tableID == tableID }
+    }
+
+    func setBehavioralLink(_ link: BehavioralLink) {
+        behavioralLinks.removeAll { $0.tableID == link.tableID }
+        behavioralLinks.append(link)
+    }
+
+    func linkedBehavioralTargetOptions(subjectNames: [String]) -> [BehavioralTargetOption] {
+        behavioralData.flatMap { table -> [BehavioralTargetOption] in
+            guard let link = behavioralLink(tableID: table.id),
+                  !link.subjectToRow.isEmpty else { return [] }
+            return table.headers.filter { $0 != link.subjectColumn }.compactMap { column in
+                guard let columnIndex = table.headers.firstIndex(of: column) else { return nil }
+                let values = subjectNames.compactMap { subject -> String? in
+                    guard let rowIndex = link.subjectToRow[subject],
+                          rowIndex < table.rows.count,
+                          columnIndex < table.rows[rowIndex].count else { return nil }
+                    return table.rows[rowIndex][columnIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                }.filter { !$0.isEmpty }
+                let unique = Set(values)
+                guard unique.count >= 2, unique.count <= max(20, subjectNames.count / 2) else { return nil }
+                return BehavioralTargetOption(tableID: table.id, tableName: table.name, columnName: column)
+            }
+        }
+    }
+
+    func behavioralLabels(tableID: UUID, columnName: String, subjectNames: [String]) -> [String: String] {
+        guard let table = behavioralItem(id: tableID),
+              let link = behavioralLink(tableID: tableID),
+              let columnIndex = table.headers.firstIndex(of: columnName) else { return [:] }
+        var labels: [String: String] = [:]
+        for subject in subjectNames {
+            guard let rowIndex = link.subjectToRow[subject],
+                  rowIndex < table.rows.count,
+                  columnIndex < table.rows[rowIndex].count else { continue }
+            let value = table.rows[rowIndex][columnIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { labels[subject] = value }
+        }
+        return labels
+    }
+
+    struct BehavioralTargetOption: Hashable, Sendable {
+        let tableID: UUID
+        let tableName: String
+        let columnName: String
     }
 
     func addImportedDerivedData(_ item: DerivedDataItem) {

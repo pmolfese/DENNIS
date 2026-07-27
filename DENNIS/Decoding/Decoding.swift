@@ -371,6 +371,42 @@ nonisolated enum Decoding {
         return makeDataset(observations: observations, labels: labels, timeIndices: timeIndices, timesMS: timesMS)
     }
 
+    static func makeSubjectLabelDataset(
+        from input: EPTensor.Input,
+        subjects: [DecodingSubjectInfo],
+        conditionNames: [String],
+        selectedConditions: Set<String>,
+        labelsBySubjectName: [String: String],
+        timeIndices: [Int],
+        timesMS: [Double]? = nil
+    ) -> DecodingDataset? {
+        guard !timeIndices.isEmpty else { return nil }
+        let selectedConditionIndices = conditionNames.indices.filter { selectedConditions.contains(conditionNames[$0]) }
+        guard !selectedConditionIndices.isEmpty else { return nil }
+        let labels = orderedUnique(subjects.compactMap { labelsBySubjectName[$0.name] })
+        guard labels.count >= 2 else { return nil }
+        var observations: [DecodingObservation] = []
+
+        for (subjectIndex, cells) in input.subjects.enumerated() {
+            guard subjectIndex < subjects.count,
+                  let label = labelsBySubjectName[subjects[subjectIndex].name] else { continue }
+            var features: [Double] = []
+            for conditionIndex in selectedConditionIndices where conditionIndex < cells.count {
+                features += flatten(samples: cells[conditionIndex], timeIndices: timeIndices)
+            }
+            guard !features.isEmpty else { continue }
+            observations.append(DecodingObservation(
+                subjectIndex: subjectIndex,
+                subjectName: subjects[subjectIndex].name,
+                label: label,
+                features: features,
+                kind: .averagedCondition
+            ))
+        }
+
+        return makeDataset(observations: observations, labels: labels, timeIndices: timeIndices, timesMS: timesMS)
+    }
+
     static func makeEpochDataset(
         epochs: [DecodingEpoch],
         labels: [String],

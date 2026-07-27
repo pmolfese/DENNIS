@@ -37,7 +37,15 @@ final class TableImportPlan: Identifiable {
     }
 
     private static func defaultKind(for url: URL) -> TableImportKind {
-        url.lastPathComponent.localizedCaseInsensitiveContains("derived") ? .derived : .behavioral
+        if let headers = try? TableDataImporter.peekHeaders(url: url),
+           TableDataImporter.looksLikeDerivedData(headers: headers) {
+            return .derived
+        }
+        let filename = url.lastPathComponent.lowercased()
+        if filename.contains("derived") || filename.contains("reconstructed") || filename.contains("tfsf") {
+            return .derived
+        }
+        return .behavioral
     }
 }
 
@@ -68,13 +76,28 @@ nonisolated enum TableDataImporter {
     }
 
     static func parse(url: URL) throws -> ParsedTable {
-        let text = try String(contentsOf: url, encoding: .utf8)
-        let delimiter = url.pathExtension.lowercased() == "tsv" ? "\t" : ","
-        let records = parseRecords(text, delimiter: Character(delimiter))
+        let text = normalizedLineEndings(try String(contentsOf: url, encoding: .utf8))
+        let delimiter = delimiter(for: url, text: text)
+        let records = parseRecords(text, delimiter: delimiter)
         guard let header = records.first, !header.isEmpty else {
             throw ImportError.emptyTable
         }
-        return ParsedTable(headers: header, rows: Array(records.dropFirst()))
+        return ParsedTable(headers: cleanHeaders(header), rows: Array(records.dropFirst()))
+    }
+
+    static func peekHeaders(url: URL) throws -> [String] {
+        let text = normalizedLineEndings(try String(contentsOf: url, encoding: .utf8))
+        let delimiter = delimiter(for: url, text: text)
+        guard let first = parseRecords(text, delimiter: delimiter).first else {
+            throw ImportError.emptyTable
+        }
+        return cleanHeaders(first)
+    }
+
+    static func looksLikeDerivedData(headers: [String]) -> Bool {
+        let set = Set(headers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        let required = ["deriveddata", "subject", "condition", "channel", "timeindex", "value"]
+        return required.allSatisfy { set.contains($0) }
     }
 
     private static func derivedItem(from table: ParsedTable, url: URL) throws -> AnalysisStore.DerivedDataItem {
@@ -226,6 +249,30 @@ nonisolated enum TableDataImporter {
 
     private static func valuesAt(_ row: [String], range: Range<Int>) -> [String] {
         range.map { $0 < row.count ? row[$0] : "" }
+    }
+
+    private static func cleanHeaders(_ headers: [String]) -> [String] {
+        headers.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}"))
+        }
+    }
+
+    private static func delimiter(for url: URL, text: String) -> Character {
+        switch url.pathExtension.lowercased() {
+        case "tsv":
+            return "\t"
+        case "csv":
+            return ","
+        default:
+            let firstLine = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first ?? ""
+            return firstLine.filter { $0 == "\t" }.count > firstLine.filter { $0 == "," }.count ? "\t" : ","
+        }
+    }
+
+    private static func normalizedLineEndings(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 
     private static func timingMetadata(timesMS: [Int: Double], nTimes: Int) -> (samplingRate: Double, baselineSamples: Int) {

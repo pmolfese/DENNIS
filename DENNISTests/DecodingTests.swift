@@ -111,6 +111,26 @@ struct DecodingTests {
         #expect(dataset.featureCount == 2)
     }
 
+    @MainActor
+    @Test func buildsLinkedBehavioralSubjectDataset() throws {
+        let subjects = [subject("S1", levels: []), subject("S2", levels: [])]
+        let input = tinyInput()
+
+        let dataset = try #require(Decoding.makeSubjectLabelDataset(
+            from: input,
+            subjects: subjects.map { DecodingSubjectInfo(name: $0.name, levels: $0.levels) },
+            conditionNames: ["A", "B"],
+            selectedConditions: ["A"],
+            labelsBySubjectName: ["S1": "Fast", "S2": "Slow"],
+            timeIndices: [0, 1],
+            timesMS: [0, 100]
+        ))
+
+        #expect(dataset.labels == ["Fast", "Slow"])
+        #expect(dataset.observations.map(\.label) == ["Fast", "Slow"])
+        #expect(dataset.featureCount == 2)
+    }
+
     private func linearlySeparableDataset(time: Double? = nil) -> DecodingDataset {
         var observations: [DecodingObservation] = []
         for subject in 0..<4 {

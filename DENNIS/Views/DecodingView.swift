@@ -80,6 +80,9 @@ struct DecodingView: View {
         options += factorNames.enumerated().map { index, name in
             .betweenFactor(name: name, index: index)
         }
+        options += store.linkedBehavioralTargetOptions(subjectNames: subjectInfos.map(\.name)).map {
+            .behavioral($0)
+        }
         return options
     }
 
@@ -88,11 +91,11 @@ struct DecodingView: View {
     }
 
     private var selectedConditionRequirement: Int {
-        selectedTarget.kind == .betweenFactor ? 1 : 2
+        selectedTarget.kind.isSubjectLevel ? 1 : 2
     }
 
     private var classSectionTitle: String {
-        selectedTarget.kind == .betweenFactor ? "Predictor Conditions" : "Classes"
+        selectedTarget.kind.isSubjectLevel ? "Predictor Conditions" : "Classes"
     }
 
     private var classSectionHelp: DecodingHelpTopic {
@@ -808,6 +811,22 @@ struct DecodingView: View {
                 timeIndices: timeIndices,
                 timesMS: timesMS
             )
+        case .behavioral:
+            guard let behavioralTarget = target.behavioralTarget else { return nil }
+            let labels = store.behavioralLabels(
+                tableID: behavioralTarget.tableID,
+                columnName: behavioralTarget.columnName,
+                subjectNames: subjects.map(\.name)
+            )
+            return Decoding.makeSubjectLabelDataset(
+                from: input,
+                subjects: subjects,
+                conditionNames: conditionNames,
+                selectedConditions: selectedConditions,
+                labelsBySubjectName: labels,
+                timeIndices: timeIndices,
+                timesMS: timesMS
+            )
         }
     }
 
@@ -867,6 +886,11 @@ nonisolated private enum DecodingTargetKind: String, Sendable {
     case conditionName
     case conditionFactor
     case betweenFactor
+    case behavioral
+
+    var isSubjectLevel: Bool {
+        self == .betweenFactor || self == .behavioral
+    }
 }
 
 nonisolated private struct DecodingTargetOption: Identifiable, Hashable, Sendable {
@@ -874,12 +898,14 @@ nonisolated private struct DecodingTargetOption: Identifiable, Hashable, Sendabl
     let title: String
     let kind: DecodingTargetKind
     let factorIndex: Int?
+    let behavioralTarget: AnalysisStore.BehavioralTargetOption?
 
     static let conditionName = DecodingTargetOption(
         id: "condition-name",
         title: "Condition name",
         kind: .conditionName,
-        factorIndex: nil
+        factorIndex: nil,
+        behavioralTarget: nil
     )
 
     static func conditionFactor(name: String, index: Int) -> DecodingTargetOption {
@@ -887,7 +913,8 @@ nonisolated private struct DecodingTargetOption: Identifiable, Hashable, Sendabl
             id: "condition-factor-\(index)",
             title: "Condition: \(name)",
             kind: .conditionFactor,
-            factorIndex: index
+            factorIndex: index,
+            behavioralTarget: nil
         )
     }
 
@@ -896,7 +923,18 @@ nonisolated private struct DecodingTargetOption: Identifiable, Hashable, Sendabl
             id: "between-factor-\(index)",
             title: "Subject: \(name)",
             kind: .betweenFactor,
-            factorIndex: index
+            factorIndex: index,
+            behavioralTarget: nil
+        )
+    }
+
+    static func behavioral(_ target: AnalysisStore.BehavioralTargetOption) -> DecodingTargetOption {
+        DecodingTargetOption(
+            id: "behavioral-\(target.tableID.uuidString)-\(target.columnName)",
+            title: "Behavioral: \(target.columnName)",
+            kind: .behavioral,
+            factorIndex: nil,
+            behavioralTarget: target
         )
     }
 }

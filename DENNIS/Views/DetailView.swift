@@ -164,6 +164,12 @@ struct DetailView: View {
 private struct BehavioralDataDetail: View {
     let item: AnalysisStore.BehavioralDataItem
 
+    private let columnWidth: CGFloat = 140
+
+    private var previewRows: ArraySlice<[String]> {
+        item.rows.prefix(500)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
@@ -173,27 +179,27 @@ private struct BehavioralDataDetail: View {
                     .foregroundStyle(.secondary)
             }
             ScrollView([.horizontal, .vertical]) {
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                    GridRow {
-                        ForEach(item.headers, id: \.self) { header in
-                            Text(header)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 0) {
+                        ForEach(Array(item.headers.enumerated()), id: \.offset) { _, header in
+                            tableCell(header, isHeader: true)
                         }
                     }
-                    Divider()
-                    ForEach(Array(item.rows.prefix(500).enumerated()), id: \.offset) { _, row in
-                        GridRow {
+                    ForEach(Array(previewRows.enumerated()), id: \.offset) { rowIndex, row in
+                        HStack(spacing: 0) {
                             ForEach(item.headers.indices, id: \.self) { index in
-                                Text(index < row.count ? row[index] : "")
-                                    .font(.caption.monospaced())
-                                    .lineLimit(1)
+                                tableCell(index < row.count ? row[index] : "", isHeader: false)
                             }
                         }
+                        .background(rowIndex.isMultiple(of: 2) ? Color.clear : Color(nsColor: .controlBackgroundColor).opacity(0.35))
                     }
                 }
-                .padding()
+                .frame(minWidth: max(520, CGFloat(max(1, item.headers.count)) * (columnWidth + 16)), alignment: .topLeading)
+                .padding(1)
             }
+            .frame(minHeight: 320)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2)))
             if item.rows.count > 500 {
                 Text("Showing first 500 rows.")
                     .font(.caption)
@@ -201,6 +207,18 @@ private struct BehavioralDataDetail: View {
             }
         }
         .padding()
+    }
+
+    private func tableCell(_ value: String, isHeader: Bool) -> some View {
+        Text(value)
+            .font(isHeader ? .caption.weight(.semibold) : .caption.monospaced())
+            .foregroundStyle(isHeader ? .secondary : .primary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(width: columnWidth, height: 28, alignment: .leading)
+            .padding(.horizontal, 8)
+            .background(isHeader ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+            .border(Color.secondary.opacity(0.12), width: 0.5)
     }
 }
 

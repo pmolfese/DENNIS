@@ -21,15 +21,20 @@ struct SidebarView: View {
     let onDropURLs: ([URL]) -> Void
 
     @State private var isDropTargeted = false
+    @State private var linkingBehavioralItem: AnalysisStore.BehavioralDataItem?
+
+    private var hasSidebarContent: Bool {
+        !study.isEmpty || !store.derivedData.isEmpty || !store.behavioralData.isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             CategoriesBar(selection: $selection)
             Group {
-                if study.isEmpty {
-                    emptyState
-                } else {
+                if hasSidebarContent {
                     tree
+                } else {
+                    emptyState
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -43,6 +48,15 @@ struct SidebarView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(Color.accentColor, lineWidth: 3)
                     .padding(4)
+            }
+        }
+        .sheet(item: $linkingBehavioralItem) { item in
+            BehavioralLinkSheet(
+                item: item,
+                subjectNames: study.datasets.map(\.name),
+                existing: store.behavioralLink(tableID: item.id)
+            ) { link in
+                store.setBehavioralLink(link)
             }
         }
     }
@@ -76,8 +90,16 @@ struct SidebarView: View {
             if !store.behavioralData.isEmpty {
                 Section("Behavioral Data") {
                     ForEach(store.behavioralData) { item in
-                        BehavioralDataRow(item: item)
+                        BehavioralDataRow(item: item, link: store.behavioralLink(tableID: item.id))
                             .tag(SidebarSelection.behavioral(item.id))
+                            .contextMenu {
+                                Button {
+                                    linkingBehavioralItem = item
+                                } label: {
+                                    Label("Link to EEG Study…", systemImage: "link")
+                                }
+                                .disabled(study.datasets.isEmpty)
+                            }
                     }
                 }
             }
@@ -217,13 +239,14 @@ struct SidebarView: View {
 
 private struct BehavioralDataRow: View {
     let item: AnalysisStore.BehavioralDataItem
+    let link: AnalysisStore.BehavioralLink?
 
     var body: some View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .lineLimit(1)
-                Text("\(item.rows.count) rows × \(item.headers.count) columns")
+                Text(subtitle)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -233,6 +256,12 @@ private struct BehavioralDataRow: View {
                 .foregroundStyle(.secondary)
         }
         .help(item.sourceURL.lastPathComponent)
+    }
+
+    private var subtitle: String {
+        let base = "\(item.rows.count) rows × \(item.headers.count) columns"
+        guard let link else { return base }
+        return "\(base) · linked \(link.subjectToRow.count)"
     }
 }
 

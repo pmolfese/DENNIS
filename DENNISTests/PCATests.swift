@@ -285,6 +285,32 @@ struct PCATests {
         #expect(csv.contains("µV,6"))
     }
 
+    @Test func tableImporterRecognizesDerivedExportHeaders() {
+        let headers = [
+            "DerivedData", "Kind", "SourceGroup", "SelectedFactor",
+            "Subject", "Group", "Condition", "Stimulus",
+            "Channel", "TimeIndex", "Time_ms", "Unit", "Value"
+        ]
+
+        #expect(TableDataImporter.looksLikeDerivedData(headers: headers))
+        #expect(!TableDataImporter.looksLikeDerivedData(headers: ["Subject", "Age", "Accuracy"]))
+    }
+
+    @Test func tableImporterHandlesWindowsCRLFLineEndings() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("behavioral_crlf_\(UUID().uuidString)")
+            .appendingPathExtension("csv")
+        try "Subject,Age,Accuracy\r\nS1,20,0.95\r\nS2,21,0.90\r\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let parsed = try TableDataImporter.parse(url: url)
+
+        #expect(parsed.headers == ["Subject", "Age", "Accuracy"])
+        #expect(parsed.rows.count == 2)
+        #expect(parsed.rows[1] == ["S2", "21", "0.90"])
+    }
+
     @MainActor
     @Test func derivedDataCSVCanBeReimported() async throws {
         let item = AnalysisStore.DerivedDataItem(
