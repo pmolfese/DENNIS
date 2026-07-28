@@ -53,8 +53,15 @@ nonisolated enum TwoStepPCA {
         secondFactors: Int,
         firstRotation: PCARotation = .promax,
         secondRotation: PCARotation = .promax,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
+        firstDecomposition: PCADecomposition? = nil,
+        secondDecomposition: PCADecomposition? = nil,
+        firstMatrixType: PCAMatrixType? = nil,
+        firstLoading: PCALoading? = nil,
+        secondMatrixType: PCAMatrixType? = nil,
+        secondLoading: PCALoading? = nil,
         rotopt: Double = 3,
         seed: UInt64 = 0,
         firstTimesMS: [Double] = [],
@@ -64,11 +71,18 @@ nonisolated enum TwoStepPCA {
         precondition(firstMode != secondMode, "two-step modes must differ")
 
         report?(0.05, "First-step \(firstMode.rawValue) PCA")
+        let firstMatrixType = firstMatrixType ?? matrixType
+        let firstLoading = firstLoading ?? loading
+        let secondMatrixType = secondMatrixType ?? matrixType
+        let secondLoading = secondLoading ?? loading
+        let firstDecomposition = firstDecomposition ?? decomposition
+        let secondDecomposition = secondDecomposition ?? decomposition
         let firstMatrix = tensor.reshape(forMode: firstMode)
         let nf1 = min(firstFactors, tensor.variableCount(for: firstMode))
         let first = try PCACore.doPCA(
             firstMatrix, mode: firstMode, rotation: firstRotation, nFactors: nf1,
-            matrixType: matrixType, loading: loading, rotopt: rotopt, seed: seed
+            decomposition: firstDecomposition,
+            matrixType: firstMatrixType, loading: firstLoading, rotopt: rotopt, seed: seed
         )
 
         // Score sub-tensor dimensions: collapse the first mode's variable axis.
@@ -85,7 +99,8 @@ nonisolated enum TwoStepPCA {
             let nf2 = min(secondFactors, scoreTensor.variableCount(for: secondMode))
             let step = try PCACore.doPCA(
                 secondMatrix, mode: secondMode, rotation: secondRotation, nFactors: nf2,
-                matrixType: matrixType, loading: loading, rotopt: rotopt, seed: seed
+                decomposition: secondDecomposition,
+                matrixType: secondMatrixType, loading: secondLoading, rotopt: rotopt, seed: seed
             )
             second.append(step)
             for s in 0..<step.nFactors {
@@ -116,13 +131,26 @@ nonisolated enum TwoStepPCA {
         subjectNames: [String],
         firstRotation: PCARotation = .promax,
         secondRotation: PCARotation = .promax,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
+        firstDecomposition: PCADecomposition? = nil,
+        secondDecomposition: PCADecomposition? = nil,
+        firstMatrixType: PCAMatrixType? = nil,
+        firstLoading: PCALoading? = nil,
+        secondMatrixType: PCAMatrixType? = nil,
+        secondLoading: PCALoading? = nil,
         rotopt: Double = 3,
         seed: UInt64 = 0,
         report: PCAProgressHandler? = nil
     ) -> TwoStepPCAJackknifeResult {
         let firstRange = 0.0...0.35
+        let firstMatrixType = firstMatrixType ?? matrixType
+        let firstLoading = firstLoading ?? loading
+        let secondMatrixType = secondMatrixType ?? matrixType
+        let secondLoading = secondLoading ?? loading
+        let firstDecomposition = firstDecomposition ?? decomposition
+        let secondDecomposition = secondDecomposition ?? decomposition
         let firstJackknife = try? PCAJackknife.leaveOneSubjectOut(
             tensor: tensor,
             mode: result.firstMode,
@@ -130,8 +158,9 @@ nonisolated enum TwoStepPCA {
             subjectNames: subjectNames,
             rotation: firstRotation,
             nFactors: result.first.nFactors,
-            matrixType: matrixType,
-            loading: loading,
+            decomposition: firstDecomposition,
+            matrixType: firstMatrixType,
+            loading: firstLoading,
             rotopt: rotopt,
             seed: seed,
             report: report,
@@ -155,8 +184,9 @@ nonisolated enum TwoStepPCA {
                     subjectNames: subjectNames,
                     rotation: secondRotation,
                     nFactors: full.nFactors,
-                    matrixType: matrixType,
-                    loading: loading,
+                    decomposition: secondDecomposition,
+                    matrixType: secondMatrixType,
+                    loading: secondLoading,
                     rotopt: rotopt,
                     seed: seed,
                     report: report,

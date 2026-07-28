@@ -447,14 +447,14 @@ nonisolated enum PLS {
         let L = observed.s.count
         let method = observed.method
         let lock = NSLock()
-        var exceed = [Int](repeating: 0, count: L)
-        var done = 0
+        nonisolated(unsafe) var exceed = [Int](repeating: 0, count: L)
+        nonisolated(unsafe) var done = 0
         let reportEvery = max(1, iterations / 100)
 
         // Iterations are independent: each gets its own seeded RNG so the run is
         // both parallelizable and reproducible. Only the singular values are
         // needed, so we take the fast Gram-matrix path (no P-dimensional SVD).
-        DispatchQueue.concurrentPerform(iterations: iterations) { iter in
+        WorkerPool.concurrentPerform(iterations: iterations) { iter in
             var rng = SplitMix64(seed: seed &+ UInt64(iter) &* 0x9E3779B97F4A7C15)
             let permuted = method == .behavior
                 ? permuteBehavior(input, rng: &rng)
@@ -491,15 +491,15 @@ nonisolated enum PLS {
         let L = observed.u.cols
         let method = observed.method
         let lock = NSLock()
-        var sum = Matrix(rows: P, cols: L)
-        var sumSq = Matrix(rows: P, cols: L)
-        var n = 0
-        var done = 0
+        nonisolated(unsafe) var sum = Matrix(rows: P, cols: L)
+        nonisolated(unsafe) var sumSq = Matrix(rows: P, cols: L)
+        nonisolated(unsafe) var n = 0
+        nonisolated(unsafe) var done = 0
         let reportEvery = max(1, iterations / 100)
 
         // Each replicate is independent (own seeded RNG). The SVD + Procrustes
         // run lock-free; only the accumulation into the shared sums is guarded.
-        DispatchQueue.concurrentPerform(iterations: iterations) { iter in
+        WorkerPool.concurrentPerform(iterations: iterations) { iter in
             var rng = SplitMix64(seed: seed &+ UInt64(iter) &* 0x9E3779B97F4A7C15)
             let resampled = resampleSubjects(input, rng: &rng)
             let aligned = (try? core(resampled, method: method, centering: meanCentering))

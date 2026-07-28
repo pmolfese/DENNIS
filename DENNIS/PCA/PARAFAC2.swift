@@ -69,15 +69,21 @@ nonisolated enum PARAFAC2 {
         guard r > 0, r <= maxRank else { throw PARAFAC2Error.rankTooLarge(rank: r, max: maxRank) }
 
         let starts = max(options.nStarts, 1)
+        let maxConcurrentStarts = WorkerPool.maxWorkers(for: starts)
         var completed = 0
         var candidates: [StartResult] = []
         await withTaskGroup(of: StartResult.self) { group in
-            for start in 0..<starts {
+            var nextStart = 0
+            func submit(_ start: Int) {
                 group.addTask {
                     var rng = SplitMix64(seed: seed(for: options.seed, start: start))
                     return runStart(start: start, slices: slices, rank: r,
                                     maxIter: options.maxIter, tol: options.tol, rng: &rng)
                 }
+            }
+            while nextStart < min(starts, maxConcurrentStarts) {
+                submit(nextStart)
+                nextStart += 1
             }
 
             for await candidate in group {
@@ -85,6 +91,10 @@ nonisolated enum PARAFAC2 {
                 completed += 1
                 report?(Double(completed) / Double(starts) * 0.96,
                         "PARAFAC2 starts \(completed)/\(starts)")
+                if nextStart < starts {
+                    submit(nextStart)
+                    nextStart += 1
+                }
             }
         }
 

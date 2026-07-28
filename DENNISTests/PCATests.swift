@@ -94,6 +94,28 @@ struct PCATests {
         #expect(abs(result.totalVariance - 0.9978802629) < 1e-5)
     }
 
+    @Test func matrixAndLoadingOptionsProduceFiniteSolutions() throws {
+        for decomposition in PCADecomposition.allCases {
+            for matrixType in PCAMatrixType.allCases {
+                for loading in PCALoading.allCases {
+                    let result = try PCACore.doPCA(
+                        Matrix(Self.input),
+                        mode: .asIs,
+                        rotation: .varimax,
+                        nFactors: 2,
+                        decomposition: decomposition,
+                        matrixType: matrixType,
+                        loading: loading
+                    )
+                    #expect(result.pattern.grid.allSatisfy { $0.isFinite })
+                    #expect(result.structure.grid.allSatisfy { $0.isFinite })
+                    #expect(result.scores.grid.allSatisfy { $0.isFinite })
+                    #expect(result.variance.allSatisfy { $0.isFinite })
+                }
+            }
+        }
+    }
+
     @Test func leaveOneSubjectOutJackknifeSummarizesAlignedLoadings() throws {
         let tensor = TwoStepTests.tensor
         let full = try PCACore.doPCA(

@@ -87,6 +87,8 @@ final class PCAAnalysisModel {
 
     func runScree(members: [Dataset], conditionNames: [String],
                   timeIndices: [Int]?, mode: PCAMode,
+                  decomposition: PCADecomposition,
+                  matrixType: PCAMatrixType, loading: PCALoading,
                   groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             screeAnalysis = nil
@@ -103,7 +105,10 @@ final class PCAAnalysisModel {
             do {
                 report(0.02, "Assembling data tensor")
                 let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
-                result = .success(try Scree.analyze(tensor, mode: mode, report: report))
+                result = .success(try Scree.analyze(
+                    tensor, mode: mode, decomposition: decomposition,
+                    matrixType: matrixType, loading: loading, report: report
+                ))
             } catch {
                 result = .failure(error)
             }
@@ -127,6 +132,8 @@ final class PCAAnalysisModel {
     func runTemporalPCA(members: [Dataset], conditionNames: [String],
                         timeIndices: [Int]?, timesMS: [Double],
                         rotation: PCARotation, requestedFactors: Int,
+                        decomposition: PCADecomposition,
+                        matrixType: PCAMatrixType, loading: PCALoading,
                         jackknife: Bool,
                         groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
@@ -150,6 +157,8 @@ final class PCAAnalysisModel {
                 let matrix = tensor.reshape(forMode: .temporal)
                 let result = try PCACore.doPCA(
                     matrix, mode: .temporal, rotation: rotation, nFactors: nFactors,
+                    decomposition: decomposition,
+                    matrixType: matrixType, loading: loading,
                     report: report
                 )
                 let stability: PCAJackknifeResult?
@@ -161,6 +170,9 @@ final class PCAAnalysisModel {
                         subjectNames: subjectNames,
                         rotation: rotation,
                         nFactors: nFactors,
+                        decomposition: decomposition,
+                        matrixType: matrixType,
+                        loading: loading,
                         report: report,
                         progressRange: 0.92...1.0
                     )
@@ -190,6 +202,9 @@ final class PCAAnalysisModel {
 
     func runSpatialScree(members: [Dataset], conditionNames: [String],
                          timeIndices: [Int]?, firstRotation: PCARotation, firstFactors: Int,
+                         firstDecomposition: PCADecomposition, secondDecomposition: PCADecomposition,
+                         firstMatrixType: PCAMatrixType, firstLoading: PCALoading,
+                         secondMatrixType: PCAMatrixType, secondLoading: PCALoading,
                          groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             spatialScree = nil
@@ -208,7 +223,12 @@ final class PCAAnalysisModel {
                 let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
                 let analysis = try Scree.analyzeTwoStep(
                     tensor, firstMode: .temporal, secondMode: .spatial,
-                    firstFactors: firstFactors, firstRotation: firstRotation, report: report
+                    firstFactors: firstFactors, firstRotation: firstRotation,
+                    firstDecomposition: firstDecomposition,
+                    secondDecomposition: secondDecomposition,
+                    firstMatrixType: firstMatrixType, firstLoading: firstLoading,
+                    secondMatrixType: secondMatrixType, secondLoading: secondLoading,
+                    report: report
                 )
                 outcome = .success(analysis)
             } catch {
@@ -233,6 +253,9 @@ final class PCAAnalysisModel {
                     timeIndices: [Int]?, timesMS: [Double],
                     firstRotation: PCARotation, secondRotation: PCARotation,
                     firstFactors: Int, spatialFactors: Int,
+                    firstDecomposition: PCADecomposition, secondDecomposition: PCADecomposition,
+                    firstMatrixType: PCAMatrixType, firstLoading: PCALoading,
+                    secondMatrixType: PCAMatrixType, secondLoading: PCALoading,
                     jackknife: Bool,
                     factorNames: [String], conditionMetadata: ConditionModeMetadata,
                     sensorLayout: SensorLayout?, groupID: String, groupLabel: String,
@@ -261,6 +284,10 @@ final class PCAAnalysisModel {
                     tensor: tensor, firstMode: .temporal, secondMode: .spatial,
                     firstFactors: firstFactors, secondFactors: spatialFactors,
                     firstRotation: firstRotation, secondRotation: secondRotation,
+                    firstDecomposition: firstDecomposition,
+                    secondDecomposition: secondDecomposition,
+                    firstMatrixType: firstMatrixType, firstLoading: firstLoading,
+                    secondMatrixType: secondMatrixType, secondLoading: secondLoading,
                     firstTimesMS: timesMS, report: report
                 )
                 let result: TwoStepPCAResult
@@ -271,6 +298,12 @@ final class PCAAnalysisModel {
                         subjectNames: subjectNames,
                         firstRotation: firstRotation,
                         secondRotation: secondRotation,
+                        firstDecomposition: firstDecomposition,
+                        secondDecomposition: secondDecomposition,
+                        firstMatrixType: firstMatrixType,
+                        firstLoading: firstLoading,
+                        secondMatrixType: secondMatrixType,
+                        secondLoading: secondLoading,
                         report: report
                     )
                     result = TwoStepPCAResult(

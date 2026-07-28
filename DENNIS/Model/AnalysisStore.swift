@@ -10,6 +10,11 @@
 import Foundation
 import Observation
 
+nonisolated enum BehavioralTargetValueKind: String, Sendable {
+    case categorical
+    case continuous
+}
+
 /// Top-level workspace modes shown in the panel selector.
 enum AppMode: String, CaseIterable, Identifiable, Codable {
     case pca = "PCA"
@@ -247,8 +252,13 @@ final class AnalysisStore {
                     return table.rows[rowIndex][columnIndex].trimmingCharacters(in: .whitespacesAndNewlines)
                 }.filter { !$0.isEmpty }
                 let unique = Set(values)
+                let numericValues = values.compactMap(Self.parseBehavioralNumber)
+                if numericValues.count == values.count,
+                   Set(numericValues).count >= max(3, min(6, subjectNames.count / 2)) {
+                    return BehavioralTargetOption(tableID: table.id, tableName: table.name, columnName: column, valueKind: .continuous)
+                }
                 guard unique.count >= 2, unique.count <= max(20, subjectNames.count / 2) else { return nil }
-                return BehavioralTargetOption(tableID: table.id, tableName: table.name, columnName: column)
+                return BehavioralTargetOption(tableID: table.id, tableName: table.name, columnName: column, valueKind: .categorical)
             }
         }
     }
@@ -268,10 +278,32 @@ final class AnalysisStore {
         return labels
     }
 
-    struct BehavioralTargetOption: Hashable, Sendable {
+    func behavioralValues(tableID: UUID, columnName: String, subjectNames: [String]) -> [String: Double] {
+        guard let table = behavioralItem(id: tableID),
+              let link = behavioralLink(tableID: tableID),
+              let columnIndex = table.headers.firstIndex(of: columnName) else { return [:] }
+        var values: [String: Double] = [:]
+        for subject in subjectNames {
+            guard let rowIndex = link.subjectToRow[subject],
+                  rowIndex < table.rows.count,
+                  columnIndex < table.rows[rowIndex].count,
+                  let value = Self.parseBehavioralNumber(table.rows[rowIndex][columnIndex]) else { continue }
+            values[subject] = value
+        }
+        return values
+    }
+
+    nonisolated private static func parseBehavioralNumber(_ value: String) -> Double? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Double(trimmed.replacingOccurrences(of: ",", with: ""))
+    }
+
+    nonisolated struct BehavioralTargetOption: Hashable, Sendable {
         let tableID: UUID
         let tableName: String
         let columnName: String
+        let valueKind: BehavioralTargetValueKind
     }
 
     func addImportedDerivedData(_ item: DerivedDataItem) {

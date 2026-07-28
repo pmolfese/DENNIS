@@ -91,11 +91,13 @@ nonisolated enum PARAFAC {
         let unfoldings = (0..<n).map { tensor.unfold(mode: $0) }
 
         let starts = max(options.nStarts, 1)
+        let maxConcurrentStarts = WorkerPool.maxWorkers(for: starts)
         var completedStarts = 0
         var candidates: [StartResult] = []
 
         await withTaskGroup(of: StartResult.self) { group in
-            for start in 0..<starts {
+            var nextStart = 0
+            func submit(_ start: Int) {
                 group.addTask {
                     var rng = SplitMix64(seed: seed(for: options.seed, start: start))
                     var factors = (0..<n).map {
@@ -116,12 +118,20 @@ nonisolated enum PARAFAC {
                     return StartResult(start: start, fit: fit, factors: factors, iterations: iters)
                 }
             }
+            while nextStart < min(starts, maxConcurrentStarts) {
+                submit(nextStart)
+                nextStart += 1
+            }
 
             for await candidate in group {
                 candidates.append(candidate)
                 completedStarts += 1
                 report?(Double(completedStarts) / Double(starts) * 0.96,
                         "ALS starts \(completedStarts)/\(starts)")
+                if nextStart < starts {
+                    submit(nextStart)
+                    nextStart += 1
+                }
             }
         }
 

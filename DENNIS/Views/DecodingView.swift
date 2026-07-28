@@ -29,13 +29,18 @@ struct DecodingView: View {
     @State private var slidingWindowMS: Double = 50
     @State private var slidingStepMS: Double = 25
     @State private var classifier: DecodingClassifier = .shrinkageLDA
+    @State private var regressor: DecodingRegressor = .ridgeElasticNet
     @State private var usesMultithreading = true
     @State private var runPermutations = false
     @State private var permutationCount = 100
     @State private var result: DecodingResult?
+    @State private var regressionResult: DecodingRegressionResult?
     @State private var windowResults: [DecodingWindowResult] = []
+    @State private var regressionWindowResults: [DecodingRegressionWindowResult] = []
     @State private var temporalResult: TemporalGeneralizationResult?
+    @State private var regressionTemporalResult: RegressionTemporalGeneralizationResult?
     @State private var permutationResult: DecodingPermutationResult?
+    @State private var regressionPermutationResult: DecodingRegressionPermutationResult?
     @State private var isRunning = false
     @State private var progressFraction = 0.0
     @State private var progressStatus = "Idle."
@@ -90,6 +95,10 @@ struct DecodingView: View {
         targetOptions.first { $0.id == selectedTargetID } ?? .conditionName
     }
 
+    private var isContinuousPrediction: Bool {
+        selectedTarget.kind == .behavioralContinuous
+    }
+
     private var selectedConditionRequirement: Int {
         selectedTarget.kind.isSubjectLevel ? 1 : 2
     }
@@ -120,11 +129,13 @@ struct DecodingView: View {
                         progressPanel
                     } else if let result {
                         results(result)
+                    } else if let regressionResult {
+                        regressionResults(regressionResult)
                     } else {
                         ContentUnavailableView(
-                            "Ready To Decode",
+                            isContinuousPrediction ? "Ready To Predict" : "Ready To Decode",
                             systemImage: "brain.head.profile",
-                            description: Text("Choose classes and an ERP window, then run condition decoding.")
+                            description: Text(isContinuousPrediction ? "Choose predictor ERPs and an ERP window, then predict the numeric behavioral target." : "Choose classes and an ERP window, then run condition decoding.")
                         )
                         .padding(.top, 40)
                     }
@@ -136,7 +147,7 @@ struct DecodingView: View {
         .task(id: loadSignature) {
             initializeConditions()
             initializeTarget()
-            result = nil
+            resetOutputs()
         }
         .alert("Decoding Failed", isPresented: Binding(
             get: { error != nil },
@@ -216,7 +227,7 @@ struct DecodingView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(width: 220)
-                    .onChange(of: selectedTargetID) { _, _ in result = nil }
+                    .onChange(of: selectedTargetID) { _, _ in resetOutputs() }
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -231,14 +242,24 @@ struct DecodingView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    fieldLabel("Classifier", help: .classifier)
-                    Picker("Classifier", selection: $classifier) {
-                        ForEach(DecodingClassifier.allCases) { option in
-                            Text(option.rawValue).tag(option)
+                    fieldLabel(isContinuousPrediction ? "Prediction Model" : "Classifier", help: .classifier)
+                    if isContinuousPrediction {
+                        Picker("Prediction Model", selection: $regressor) {
+                            ForEach(DecodingRegressor.allCases) { option in
+                                Text(option.rawValue).tag(option)
+                            }
                         }
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    } else {
+                        Picker("Classifier", selection: $classifier) {
+                            ForEach(DecodingClassifier.allCases) { option in
+                                Text(option.rawValue).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .fixedSize()
                     }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -309,7 +330,7 @@ struct DecodingView: View {
                 Button {
                     runDecoding()
                 } label: {
-                    Label("Run Decoding", systemImage: "play.fill")
+                    Label(isContinuousPrediction ? "Run Prediction" : "Run Decoding", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(selectedConditions.count < selectedConditionRequirement || isRunning)
@@ -388,6 +409,38 @@ struct DecodingView: View {
         }
     }
 
+    private func regressionResults(_ result: DecodingRegressionResult) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 28) {
+                scalarMetric("Prediction r", value: result.correlation)
+                scalarMetric("R²", value: result.rSquared)
+                scalarMetric("RMSE", value: result.rmse)
+                scalarMetric("MAE", value: result.mae)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(result.regressor.rawValue)
+                        .font(.title3.weight(.semibold))
+                }
+            }
+
+            regressionPredictionsTable(result)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            regressionExportSection(result)
+            if let regressionPermutationResult {
+                regressionPermutationSection(regressionPermutationResult)
+            }
+            if !regressionWindowResults.isEmpty {
+                regressionWindowCurveSection(regressionWindowResults)
+                regressionButterflySection(regressionWindowResults)
+            }
+            if let regressionTemporalResult {
+                regressionTemporalGeneralizationSection(regressionTemporalResult)
+            }
+        }
+    }
+
     private func exportSection(_ result: DecodingResult) -> some View {
         HStack(spacing: 10) {
             Button {
@@ -418,10 +471,49 @@ struct DecodingView: View {
         .buttonStyle(.bordered)
     }
 
+    private func regressionExportSection(_ result: DecodingRegressionResult) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                saveCSV(Decoding.regressionPredictionsCSV(result), name: "behavioral_predictions")
+            } label: {
+                Label("Predictions CSV", systemImage: "square.and.arrow.down")
+            }
+            if !regressionWindowResults.isEmpty {
+                Button {
+                    saveCSV(Decoding.regressionCurveCSV(regressionWindowResults), name: "prediction_curve")
+                } label: {
+                    Label("Curve CSV", systemImage: "square.and.arrow.down")
+                }
+            }
+            if let regressionTemporalResult {
+                Button {
+                    saveCSV(Decoding.regressionTemporalGeneralizationCSV(regressionTemporalResult), name: "prediction_temporal_generalization")
+                } label: {
+                    Label("Temporal Matrix CSV", systemImage: "square.and.arrow.down")
+                }
+            }
+        }
+        .buttonStyle(.bordered)
+    }
+
     private func permutationSection(_ permutation: DecodingPermutationResult) -> some View {
         HStack(spacing: 28) {
             metric("Permutation p", value: permutation.pValue)
             metric("Observed", value: permutation.observed)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Null runs")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(permutation.nullDistribution.count)")
+                    .font(.title2.monospacedDigit().weight(.semibold))
+            }
+        }
+    }
+
+    private func regressionPermutationSection(_ permutation: DecodingRegressionPermutationResult) -> some View {
+        HStack(spacing: 28) {
+            scalarMetric("Permutation p", value: permutation.pValue)
+            scalarMetric("Observed r", value: permutation.observed)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Null runs")
                     .font(.caption.weight(.semibold))
@@ -455,6 +547,29 @@ struct DecodingView: View {
         }
     }
 
+    private func regressionWindowCurveSection(_ windows: [DecodingRegressionWindowResult]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(featureMode == .timeResolved ? "Time-Resolved Prediction" : "Sliding-Window Prediction")
+                .font(.headline)
+            Chart(windows) { point in
+                LineMark(
+                    x: .value("Time (ms)", point.centerMS),
+                    y: .value("Prediction r", point.correlation)
+                )
+                PointMark(
+                    x: .value("Time (ms)", point.centerMS),
+                    y: .value("Prediction r", point.correlation)
+                )
+                RuleMark(y: .value("Zero", 0))
+                    .foregroundStyle(.secondary.opacity(0.45))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+            }
+            .chartXAxisLabel("Time (ms)")
+            .chartYAxisLabel("Prediction r")
+            .frame(minHeight: 240)
+        }
+    }
+
     @ViewBuilder
     private func decodingButterflySection(_ windows: [DecodingWindowResult]) -> some View {
         if let input = sourceInput {
@@ -478,6 +593,53 @@ struct DecodingView: View {
                         samplingRate: input.samplingRate,
                         baselineSamples: input.baselineSamples,
                         windows: windows,
+                        amplitudeUnit: derivedItem == nil ? "µV" : "component units"
+                    )
+                    .frame(minHeight: 230)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func regressionButterflySection(_ windows: [DecodingRegressionWindowResult]) -> some View {
+        if let input = sourceInput {
+            let samples = butterflySamples(from: input)
+            if !samples.isEmpty {
+                let overlayWindows = windows.map { window in
+                    DecodingWindowResult(
+                        centerMS: window.centerMS,
+                        startMS: window.startMS,
+                        endMS: window.endMS,
+                        result: DecodingResult(
+                            classifier: .nearestCentroid,
+                            labels: [],
+                            predictions: [],
+                            confusion: [],
+                            accuracy: max(0, min(1, (window.correlation + 1) / 2)),
+                            balancedAccuracy: max(0, min(1, (window.correlation + 1) / 2)),
+                            chance: 0.5
+                        )
+                    )
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(derivedItem == nil ? "Prediction Overlay Butterfly" : "Prediction Overlay Component Butterfly")
+                            .font(.headline)
+                        Spacer()
+                        HStack(spacing: 12) {
+                            Label("positive r", systemImage: "square.fill")
+                                .foregroundStyle(.green)
+                            Label("zero/negative r", systemImage: "square.fill")
+                                .foregroundStyle(.red)
+                        }
+                        .font(.caption)
+                    }
+                    DecodingButterflyOverlayView(
+                        samples: samples,
+                        samplingRate: input.samplingRate,
+                        baselineSamples: input.baselineSamples,
+                        windows: overlayWindows,
                         amplitudeUnit: derivedItem == nil ? "µV" : "component units"
                     )
                     .frame(minHeight: 230)
@@ -522,12 +684,58 @@ struct DecodingView: View {
         }
     }
 
+    private func regressionTemporalGeneralizationSection(_ temporal: RegressionTemporalGeneralizationResult) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Temporal Prediction Generalization").font(.headline)
+            ScrollView([.horizontal, .vertical]) {
+                Grid(horizontalSpacing: 4, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Train \\ Test")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 80)
+                        ForEach(Array(temporal.testTimesMS.enumerated()), id: \.offset) { _, time in
+                            Text(Decoding.format(time))
+                                .font(.caption2.monospacedDigit())
+                                .frame(width: 48)
+                        }
+                    }
+                    ForEach(Array(temporal.trainTimesMS.enumerated()), id: \.offset) { row, train in
+                        GridRow {
+                            Text(Decoding.format(train))
+                                .font(.caption2.monospacedDigit())
+                                .frame(width: 80)
+                            ForEach(Array(temporal.correlations[row].enumerated()), id: \.offset) { _, value in
+                                Text(Decoding.format(value))
+                                    .font(.caption2.monospacedDigit())
+                                    .frame(width: 48, height: 26)
+                                    .background(temporalCellColor((value + 1) / 2))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(maxHeight: 360)
+        }
+    }
+
     private func metric(_ title: String, value: Double) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text(value.formatted(.percent.precision(.fractionLength(1))))
+                .font(.title2.monospacedDigit().weight(.semibold))
+        }
+    }
+
+    private func scalarMetric(_ title: String, value: Double) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(Decoding.format(value))
                 .font(.title2.monospacedDigit().weight(.semibold))
         }
     }
@@ -581,6 +789,29 @@ struct DecodingView: View {
         }
     }
 
+    private func regressionPredictionsTable(_ result: DecodingRegressionResult) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Held-Out Predictions").font(.headline)
+            Table(result.predictions) {
+                TableColumn("Fold") { prediction in
+                    Text("\(prediction.fold)").monospacedDigit()
+                }
+                .width(48)
+                TableColumn("Subject", value: \.subjectName)
+                TableColumn("Actual") { prediction in
+                    Text(Decoding.format(prediction.actual)).monospacedDigit()
+                }
+                TableColumn("Predicted") { prediction in
+                    Text(Decoding.format(prediction.predicted)).monospacedDigit()
+                }
+                TableColumn("Residual") { prediction in
+                    Text(Decoding.format(prediction.residual)).monospacedDigit()
+                }
+            }
+            .frame(minHeight: 220)
+        }
+    }
+
     private func cellColor(row: Int, col: Int, value: Int) -> Color {
         if row == col { return Color.green.opacity(value > 0 ? 0.22 : 0.08) }
         return Color.red.opacity(value > 0 ? 0.18 : 0.06)
@@ -595,6 +826,17 @@ struct DecodingView: View {
         if selectedConditions.isEmpty || !selectedConditions.isSubset(of: Set(conditionNames)) {
             selectedConditions = Set(conditionNames)
         }
+    }
+
+    private func resetOutputs() {
+        result = nil
+        regressionResult = nil
+        windowResults = []
+        regressionWindowResults = []
+        temporalResult = nil
+        regressionTemporalResult = nil
+        permutationResult = nil
+        regressionPermutationResult = nil
     }
 
     private func initializeTarget() {
@@ -619,10 +861,7 @@ struct DecodingView: View {
     }
 
     private func runDecoding() {
-        result = nil
-        windowResults = []
-        temporalResult = nil
-        permutationResult = nil
+        resetOutputs()
         progressFraction = 0
         progressStatus = "Gathering the selected group's loaded averaged ERP data and checking target labels for \(selectedTarget.title)."
         guard let input = sourceInput else {
@@ -638,6 +877,10 @@ struct DecodingView: View {
             return
         }
         progressFraction = 0.08
+        if isContinuousPrediction {
+            runRegressionPrediction(input: input, axis: axis)
+            return
+        }
         progressStatus = "Building the decoding matrix for \(selectedTarget.title): rows are held out by subject, columns are ERP features."
         guard let dataset = makeSelectedDataset(
             input: input,
@@ -702,6 +945,71 @@ struct DecodingView: View {
         }
     }
 
+    private func runRegressionPrediction(input: EPTensor.Input, axis: EPTensor.TimeAxis) {
+        progressStatus = "Building the prediction matrix for \(selectedTarget.title): rows are subjects, columns are ERP features, target is numeric behavior."
+        guard let dataset = makeSelectedRegressionDataset(
+            input: input,
+            subjects: subjectInfos,
+            timeIndices: axis.indices,
+            timesMS: axis.timesMS
+        ) else {
+            error = "Could not build a numeric behavioral prediction dataset for \(selectedTarget.title). Check that linked values are numeric and vary across subjects."
+            return
+        }
+
+        isRunning = true
+        progressFraction = 0.1
+        progressStatus = "Prepared \(dataset.observations.count) subjects with \(dataset.featureCount.formatted()) features each; launching \(featureMode.rawValue.lowercased())."
+        let selectedRegressor = regressor
+        let mode = featureMode
+        let concurrent = usesMultithreading
+        let permutationsEnabled = runPermutations
+        let permutations = permutationCount
+        let target = selectedTarget
+        let metadata = conditionMetadata
+        let windowDatasets = buildRegressionWindowDatasets(
+            input: input,
+            subjects: subjectInfos,
+            axis: axis,
+            target: target,
+            metadata: metadata
+        )
+        Task {
+            do {
+                let output = try await Task.detached(priority: .userInitiated) {
+                    try runRegressionAnalysis(
+                        dataset: dataset,
+                        windowDatasets: windowDatasets,
+                        mode: mode,
+                        regressor: selectedRegressor,
+                        concurrent: concurrent,
+                        runPermutations: permutationsEnabled,
+                        permutations: permutations
+                    ) { update in
+                        Task { @MainActor in
+                            progressFraction = 0.1 + 0.85 * update.fraction
+                            progressStatus = update.message
+                        }
+                    }
+                }.value
+                await MainActor.run {
+                    progressFraction = 1
+                    progressStatus = "Finished prediction: reporting held-out behavioral values and summary metrics."
+                    regressionResult = output.whole
+                    regressionWindowResults = output.windows
+                    regressionTemporalResult = output.temporal
+                    regressionPermutationResult = output.permutation
+                    isRunning = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    isRunning = false
+                }
+            }
+        }
+    }
+
     private func buildWindowDatasets(
         input: EPTensor.Input,
         subjects: [DecodingSubjectInfo],
@@ -739,6 +1047,58 @@ struct DecodingView: View {
                 }
                 if !indices.isEmpty,
                    let dataset = makeSelectedDataset(
+                    input: input,
+                    subjects: subjects,
+                    target: target,
+                    metadata: metadata,
+                    timeIndices: indices,
+                    timesMS: fullTimes
+                   ) {
+                    windows.append(dataset)
+                }
+                center += step
+            }
+            return windows
+        }
+    }
+
+    private func buildRegressionWindowDatasets(
+        input: EPTensor.Input,
+        subjects: [DecodingSubjectInfo],
+        axis: EPTensor.TimeAxis,
+        target: DecodingTargetOption,
+        metadata: ConditionModeMetadata
+    ) -> [DecodingRegressionDataset] {
+        switch featureMode {
+        case .wholeWindow:
+            return []
+        case .timeResolved, .temporalGeneralization:
+            return axis.indices.compactMap { originalIndex in
+                makeSelectedRegressionDataset(
+                    input: input,
+                    subjects: subjects,
+                    target: target,
+                    metadata: metadata,
+                    timeIndices: [originalIndex],
+                    timesMS: fullTimesMS(input)
+                )
+            }
+        case .slidingWindow:
+            let fullTimes = fullTimesMS(input)
+            let width = max(1, slidingWindowMS)
+            let step = max(1, slidingStepMS)
+            let start = min(trimPre, trimPost)
+            let end = max(trimPre, trimPost)
+            var windows: [DecodingRegressionDataset] = []
+            var center = start + width / 2
+            while center <= end - width / 2 + 1e-6 {
+                let lo = center - width / 2
+                let hi = center + width / 2
+                let indices = axis.indices.filter { index in
+                    index < fullTimes.count && fullTimes[index] >= lo && fullTimes[index] <= hi
+                }
+                if !indices.isEmpty,
+                   let dataset = makeSelectedRegressionDataset(
                     input: input,
                     subjects: subjects,
                     target: target,
@@ -827,7 +1187,51 @@ struct DecodingView: View {
                 timeIndices: timeIndices,
                 timesMS: timesMS
             )
+        case .behavioralContinuous:
+            return nil
         }
+    }
+
+    private func makeSelectedRegressionDataset(
+        input: EPTensor.Input,
+        subjects: [DecodingSubjectInfo],
+        timeIndices: [Int],
+        timesMS: [Double]?
+    ) -> DecodingRegressionDataset? {
+        makeSelectedRegressionDataset(
+            input: input,
+            subjects: subjects,
+            target: selectedTarget,
+            metadata: conditionMetadata,
+            timeIndices: timeIndices,
+            timesMS: timesMS
+        )
+    }
+
+    private func makeSelectedRegressionDataset(
+        input: EPTensor.Input,
+        subjects: [DecodingSubjectInfo],
+        target: DecodingTargetOption,
+        metadata: ConditionModeMetadata,
+        timeIndices: [Int],
+        timesMS: [Double]?
+    ) -> DecodingRegressionDataset? {
+        guard target.kind == .behavioralContinuous,
+              let behavioralTarget = target.behavioralTarget else { return nil }
+        let values = store.behavioralValues(
+            tableID: behavioralTarget.tableID,
+            columnName: behavioralTarget.columnName,
+            subjectNames: subjects.map(\.name)
+        )
+        return Decoding.makeSubjectValueDataset(
+            from: input,
+            subjects: subjects,
+            conditionNames: conditionNames,
+            selectedConditions: selectedConditions,
+            valuesBySubjectName: values,
+            timeIndices: timeIndices,
+            timesMS: timesMS
+        )
     }
 
     private func butterflySamples(from input: EPTensor.Input) -> [[Float]] {
@@ -887,9 +1291,10 @@ nonisolated private enum DecodingTargetKind: String, Sendable {
     case conditionFactor
     case betweenFactor
     case behavioral
+    case behavioralContinuous
 
     var isSubjectLevel: Bool {
-        self == .betweenFactor || self == .behavioral
+        self == .betweenFactor || self == .behavioral || self == .behavioralContinuous
     }
 }
 
@@ -931,8 +1336,8 @@ nonisolated private struct DecodingTargetOption: Identifiable, Hashable, Sendabl
     static func behavioral(_ target: AnalysisStore.BehavioralTargetOption) -> DecodingTargetOption {
         DecodingTargetOption(
             id: "behavioral-\(target.tableID.uuidString)-\(target.columnName)",
-            title: "Behavioral: \(target.columnName)",
-            kind: .behavioral,
+            title: target.valueKind == .continuous ? "Behavioral value: \(target.columnName)" : "Behavioral class: \(target.columnName)",
+            kind: target.valueKind == .continuous ? .behavioralContinuous : .behavioral,
             factorIndex: nil,
             behavioralTarget: target
         )
@@ -973,7 +1378,7 @@ private enum DecodingHelpTopic: String, Identifiable {
     var message: String {
         switch self {
         case .target:
-            "Choose what DENNIS should predict. Condition name decodes ERP condition labels. Condition targets decode within-subject condition metadata. Subject targets decode between-subject design-factor levels from each subject's ERP pattern."
+            "Choose what DENNIS should predict. Condition name decodes ERP condition labels. Condition targets decode within-subject condition metadata. Subject targets decode between-subject design-factor levels from each subject's ERP pattern. Numeric behavioral targets use continuous prediction."
         case .classes:
             "Select the condition cells included as target classes. Leave-one-subject-out validation holds out every selected condition for one subject at a time."
         case .predictorConditions:
@@ -981,7 +1386,7 @@ private enum DecodingHelpTopic: String, Identifiable {
         case .mode:
             "Choose how ERP samples become features: one whole window, one model per time point, sliding windows, or train-time by test-time temporal generalization."
         case .classifier:
-            "Shrinkage LDA is the default for high-dimensional ERP data. Nearest centroid is simpler and useful as a transparent baseline."
+            "Shrinkage LDA is the default for high-dimensional categorical ERP decoding. L2 Logistic is useful when you want regularized linear decision scores. Linear SVM is a strong margin-based option when classes may be separable by a sparse or noisy boundary, but its scores are less probability-like. Nearest centroid is a transparent baseline. For numeric behavior, use Ridge / Elastic Net: it is ridge-dominant with a small L1 term, which is a good default when ERP features outnumber subjects and correlated time-channel samples would make ordinary regression unstable."
         case .erpWindow:
             "Set the time range, in milliseconds relative to stimulus onset, used to extract ERP features."
         case .downsample:
@@ -1273,6 +1678,13 @@ nonisolated private struct DecodingAnalysisOutput: Sendable {
     let permutation: DecodingPermutationResult?
 }
 
+nonisolated private struct RegressionAnalysisOutput: Sendable {
+    let whole: DecodingRegressionResult
+    let windows: [DecodingRegressionWindowResult]
+    let temporal: RegressionTemporalGeneralizationResult?
+    let permutation: DecodingRegressionPermutationResult?
+}
+
 nonisolated private func runDecodingAnalysis(
     dataset: DecodingDataset,
     windowDatasets: [DecodingDataset],
@@ -1317,5 +1729,52 @@ nonisolated private func runDecodingAnalysis(
             ? try Decoding.permutationTest(dataset: dataset, classifier: classifier, observed: best, permutations: permutations, concurrent: concurrent, progress: progress)
             : nil
         return DecodingAnalysisOutput(whole: best, windows: diagonalWindows, temporal: temporal, permutation: permutation)
+    }
+}
+
+nonisolated private func runRegressionAnalysis(
+    dataset: DecodingRegressionDataset,
+    windowDatasets: [DecodingRegressionDataset],
+    mode: DecodingFeatureMode,
+    regressor: DecodingRegressor,
+    concurrent: Bool,
+    runPermutations: Bool,
+    permutations: Int,
+    progress: @escaping @Sendable (DecodingProgress) -> Void
+) throws -> RegressionAnalysisOutput {
+    switch mode {
+    case .wholeWindow:
+        let whole = try Decoding.leaveOneSubjectOutRegression(dataset, regressor: regressor, concurrent: concurrent, progress: progress)
+        let permutation = runPermutations
+            ? try Decoding.regressionPermutationTest(dataset: dataset, regressor: regressor, observed: whole, permutations: permutations, concurrent: concurrent, progress: progress)
+            : nil
+        return RegressionAnalysisOutput(whole: whole, windows: [], temporal: nil, permutation: permutation)
+
+    case .timeResolved, .slidingWindow:
+        let windows = try Decoding.timeResolvedRegression(datasets: windowDatasets, regressor: regressor, concurrent: concurrent, progress: progress)
+        let best: DecodingRegressionResult
+        if let windowBest = windows.max(by: { abs($0.correlation) < abs($1.correlation) })?.result {
+            best = windowBest
+        } else {
+            best = try Decoding.leaveOneSubjectOutRegression(dataset, regressor: regressor, concurrent: concurrent, progress: progress)
+        }
+        let permutation = runPermutations
+            ? try Decoding.regressionPermutationTest(dataset: dataset, regressor: regressor, observed: best, permutations: permutations, concurrent: concurrent, progress: progress)
+            : nil
+        return RegressionAnalysisOutput(whole: best, windows: windows, temporal: nil, permutation: permutation)
+
+    case .temporalGeneralization:
+        let temporal = try Decoding.regressionTemporalGeneralization(datasets: windowDatasets, regressor: regressor, concurrent: concurrent, progress: progress)
+        let diagonalWindows = try Decoding.timeResolvedRegression(datasets: windowDatasets, regressor: regressor, concurrent: concurrent, progress: progress)
+        let best: DecodingRegressionResult
+        if let windowBest = diagonalWindows.max(by: { abs($0.correlation) < abs($1.correlation) })?.result {
+            best = windowBest
+        } else {
+            best = try Decoding.leaveOneSubjectOutRegression(dataset, regressor: regressor, concurrent: concurrent, progress: progress)
+        }
+        let permutation = runPermutations
+            ? try Decoding.regressionPermutationTest(dataset: dataset, regressor: regressor, observed: best, permutations: permutations, concurrent: concurrent, progress: progress)
+            : nil
+        return RegressionAnalysisOutput(whole: best, windows: diagonalWindows, temporal: temporal, permutation: permutation)
     }
 }

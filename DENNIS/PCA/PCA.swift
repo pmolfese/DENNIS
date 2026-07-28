@@ -14,13 +14,22 @@
 import Foundation
 
 nonisolated enum PCAMatrixType: String, CaseIterable { case cov = "COV", cor = "COR", scp = "SCP" }
+nonisolated enum PCADecomposition: String, CaseIterable {
+    case svd = "SVD"
+    case nipals = "NIPALS"
+}
 nonisolated enum PCARotation: String, CaseIterable {
     case unrotated, varimax, promax, infomax, extendedInfomax
 
     /// True for the Infomax family, which bypasses the Kaiser loading path.
     var isInfomax: Bool { self == .infomax || self == .extendedInfomax }
 }
-nonisolated enum PCALoading: String, CaseIterable { case kaiser = "K", none = "N" }
+nonisolated enum PCALoading: String, CaseIterable {
+    case kaiser = "K"
+    case none = "N"
+    case covariance = "C"
+    case curetonMulaik = "W"
+}
 
 nonisolated struct PCAResult {
     /// Variables × factors loading (pattern) matrix.
@@ -91,6 +100,7 @@ nonisolated enum PCACore {
         mode: PCAMode = .asIs,
         rotation: PCARotation = .promax,
         nFactors: Int,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
         rotopt: Double = 3,
@@ -130,12 +140,18 @@ nonisolated enum PCACore {
         let relation = crossProduct(relationData).scaled(1.0 / Double(work.rows - 1))
         let sdRelation = (0..<relation.rows).map { relation[$0, $0].squareRoot() }
 
-        // Eigendecomposition (ascending) → take top nFactors descending.
-        report?(0.5, "Eigendecomposition")
+        // Eigendecomposition (ascending) → full scree and SVD/default factors.
+        report?(0.5, decomposition == .nipals ? "NIPALS decomposition" : "Eigendecomposition")
         let (eigValsAsc, eigVecsAsc) = try relation.symmetricEigen()
         let order = Array((0..<eigValsAsc.count).reversed())  // descending
         let scree = order.map { eigValsAsc[$0] }
-        let eigVecs = reorderColumns(eigVecsAsc, order: Array(order.prefix(nFactors)))
+        let eigVecs: Matrix
+        switch decomposition {
+        case .svd:
+            eigVecs = reorderColumns(eigVecsAsc, order: Array(order.prefix(nFactors)))
+        case .nipals:
+            eigVecs = nipalsComponents(relationData, nFactors: nFactors)
+        }
 
         // Score coefficients & initial scores.
         let scoreCoefficients: Matrix
@@ -176,14 +192,47 @@ nonisolated enum PCACore {
                 }
             }
 
-            // Kaiser normalization.
+            // EP Toolkit loading normalization / weighting.
             let communalities = (0..<loadings.rows).map { r in
                 (0..<loadings.cols).reduce(0.0) { $0 + loadings[r, $1] * loadings[r, $1] }
             }
-            if loading == .kaiser {
+            var curetonWeights = [Double](repeating: 1, count: loadings.rows)
+            var curetonReflect = [Double](repeating: 1, count: loadings.rows)
+            switch loading {
+            case .kaiser:
                 for r in 0..<loadings.rows {
                     let denom = communalities[r].squareRoot()
                     if denom != 0 { for c in 0..<loadings.cols { loadings[r, c] /= denom } }
+                }
+            case .covariance:
+                for r in 0..<loadings.rows {
+                    for c in 0..<loadings.cols { loadings[r, c] *= sdRelation[r] }
+                }
+            case .none:
+                break
+            case .curetonMulaik:
+                for r in 0..<loadings.rows {
+                    let denom = communalities[r].squareRoot()
+                    if denom != 0 { for c in 0..<loadings.cols { loadings[r, c] /= denom } }
+                }
+                guard nFactors > 1 else { break }
+                let target = (1.0 / Double(nFactors)).squareRoot()
+                let targetAngle = acos(target)
+                let halfPi = Double.pi / 2
+                for r in 0..<loadings.rows {
+                    let reflected = loadings[r, 0] < 0 ? -1.0 : 1.0
+                    curetonReflect[r] = reflected
+                    for c in 0..<loadings.cols { loadings[r, c] *= reflected }
+                    let firstLoading = loadings[r, 0]
+                    let angle = acos(min(1, max(-1, firstLoading)))
+                    let weight: Double
+                    if firstLoading >= target {
+                        weight = pow(cos(((targetAngle - angle) / targetAngle) * halfPi), 2) + 0.001
+                    } else {
+                        weight = pow(cos(((angle - targetAngle) / (halfPi - targetAngle)) * halfPi), 2) + 0.001
+                    }
+                    curetonWeights[r] = weight
+                    for c in 0..<loadings.cols { loadings[r, c] *= weight }
                 }
             }
 
@@ -208,13 +257,32 @@ nonisolated enum PCACore {
                 fatalError("Infomax handled above")
             }
 
-            // Undo Kaiser normalization.
-            if loading == .kaiser {
+            // Undo loading normalization / weighting before computing final scores.
+            switch loading {
+            case .kaiser:
                 for r in 0..<pattern.rows {
                     let scale = communalities[r].squareRoot()
                     for c in 0..<pattern.cols {
                         pattern[r, c] *= scale
                         structure[r, c] *= scale
+                    }
+                }
+            case .covariance:
+                for r in 0..<pattern.rows where sdRelation[r] != 0 {
+                    for c in 0..<pattern.cols {
+                        pattern[r, c] /= sdRelation[r]
+                        structure[r, c] /= sdRelation[r]
+                    }
+                }
+            case .none:
+                break
+            case .curetonMulaik:
+                for r in 0..<pattern.rows {
+                    let inverseWeight = curetonWeights[r] == 0 ? 1 : 1 / curetonWeights[r]
+                    let scale = communalities[r].squareRoot()
+                    for c in 0..<pattern.cols {
+                        pattern[r, c] *= inverseWeight * curetonReflect[r] * scale
+                        structure[r, c] *= inverseWeight * curetonReflect[r] * scale
                     }
                 }
             }
@@ -314,6 +382,98 @@ nonisolated enum PCACore {
         return out
     }
 
+    private static func nipalsComponents(
+        _ data: Matrix,
+        nFactors: Int,
+        maxIterations: Int = 20_000,
+        tolerance: Double = 1e-5
+    ) -> Matrix {
+        var residual = data
+        var components = Matrix(rows: data.cols, cols: nFactors)
+        let initialColumn = columnStd(data).enumerated().max { $0.element < $1.element }?.offset ?? 0
+
+        for factor in 0..<nFactors {
+            var scores = residual.column(initialColumn)
+            if vectorNorm(scores) == 0 {
+                scores = residual.column(maxVarianceColumn(residual))
+            }
+            guard vectorNorm(scores) > 0 else { break }
+
+            var loadings = [Double](repeating: 0, count: residual.cols)
+            for _ in 0..<maxIterations {
+                let oldScores = scores
+                loadings = multiplyTransposed(residual, by: scores)
+                let scoreSS = dot(scores, scores)
+                if scoreSS != 0 {
+                    for i in 0..<loadings.count { loadings[i] /= scoreSS }
+                }
+                normalize(&loadings)
+
+                scores = multiply(residual, by: loadings)
+                let loadingSS = dot(loadings, loadings)
+                if loadingSS != 0 {
+                    for i in 0..<scores.count { scores[i] /= loadingSS }
+                }
+
+                if squaredDistance(scores, oldScores) <= tolerance * tolerance { break }
+            }
+
+            for r in 0..<components.rows { components[r, factor] = loadings[r] }
+            for r in 0..<residual.rows {
+                for c in 0..<residual.cols {
+                    residual[r, c] -= scores[r] * loadings[c]
+                }
+            }
+        }
+
+        return components
+    }
+
+    private static func maxVarianceColumn(_ m: Matrix) -> Int {
+        columnStd(m).enumerated().max { $0.element < $1.element }?.offset ?? 0
+    }
+
+    private static func multiply(_ m: Matrix, by vector: [Double]) -> [Double] {
+        var out = [Double](repeating: 0, count: m.rows)
+        for r in 0..<m.rows {
+            var sum = 0.0
+            for c in 0..<m.cols { sum += m[r, c] * vector[c] }
+            out[r] = sum
+        }
+        return out
+    }
+
+    private static func multiplyTransposed(_ m: Matrix, by vector: [Double]) -> [Double] {
+        var out = [Double](repeating: 0, count: m.cols)
+        for c in 0..<m.cols {
+            var sum = 0.0
+            for r in 0..<m.rows { sum += m[r, c] * vector[r] }
+            out[c] = sum
+        }
+        return out
+    }
+
+    private static func normalize(_ vector: inout [Double]) {
+        let norm = vectorNorm(vector)
+        guard norm > 0 else { return }
+        for i in 0..<vector.count { vector[i] /= norm }
+    }
+
+    private static func vectorNorm(_ vector: [Double]) -> Double {
+        dot(vector, vector).squareRoot()
+    }
+
+    private static func dot(_ left: [Double], _ right: [Double]) -> Double {
+        zip(left, right).reduce(0.0) { $0 + $1.0 * $1.1 }
+    }
+
+    private static func squaredDistance(_ left: [Double], _ right: [Double]) -> Double {
+        zip(left, right).reduce(0.0) {
+            let diff = $1.0 - $1.1
+            return $0 + diff * diff
+        }
+    }
+
     // MARK: - Variance helper
 
     private static func uniqueFactorVariance(pattern: Matrix, correlation: Matrix,
@@ -343,6 +503,7 @@ nonisolated enum PCAJackknife {
         subjectNames: [String],
         rotation: PCARotation,
         nFactors: Int,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
         rotopt: Double = 3,
@@ -371,6 +532,7 @@ nonisolated enum PCAJackknife {
                     mode: mode,
                     rotation: rotation,
                     nFactors: min(nFactors, subset.variableCount(for: mode)),
+                    decomposition: decomposition,
                     matrixType: matrixType,
                     loading: loading,
                     rotopt: rotopt,

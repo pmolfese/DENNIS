@@ -47,10 +47,22 @@ struct PCAView: View {
 
     // Scree mode and PCA inputs (the runs themselves live in `model`).
     @State private var screeMode: PCAMode = .temporal
+    @State private var screeDecomposition: PCADecomposition = .svd
+    @State private var screeMatrixType: PCAMatrixType = .cov
+    @State private var screeLoading: PCALoading = .kaiser
     @State private var pcaFactors = 3
     @State private var pcaRotation: PCARotation = .promax
+    @State private var pcaDecomposition: PCADecomposition = .svd
+    @State private var pcaMatrixType: PCAMatrixType = .cov
+    @State private var pcaLoading: PCALoading = .kaiser
     @State private var runPCAJackknife = false
     @State private var dualSpatialFactors = 3
+    @State private var dualFirstDecomposition: PCADecomposition = .svd
+    @State private var dualFirstMatrixType: PCAMatrixType = .cov
+    @State private var dualFirstLoading: PCALoading = .kaiser
+    @State private var dualSecondDecomposition: PCADecomposition = .svd
+    @State private var dualSecondMatrixType: PCAMatrixType = .cov
+    @State private var dualSecondLoading: PCALoading = .kaiser
     @State private var dualSecondRotation: PCARotation = .infomax
     @State private var runDualJackknife = false
 
@@ -337,11 +349,15 @@ struct PCAView: View {
                 Button {
                     model.runScree(members: members, conditionNames: conditionNames,
                                    timeIndices: currentTimeAxis()?.indices, mode: screeMode,
+                                   decomposition: screeDecomposition,
+                                   matrixType: screeMatrixType, loading: screeLoading,
                                    groupID: groupID, store: analysis)
                 } label: { Label("Run", systemImage: "chart.xyaxis.line") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.screeRunning)
             }
+            pcaOptionsRow(decomposition: $screeDecomposition,
+                          matrixType: $screeMatrixType, loading: $screeLoading)
             if model.screeRunning { progressBar(model.screeProgress) }
             if conditionNames.isEmpty {
                 Text("No shared conditions yet.").font(.caption).foregroundStyle(.secondary)
@@ -385,12 +401,16 @@ struct PCAView: View {
                     model.runTemporalPCA(members: members, conditionNames: conditionNames,
                                          timeIndices: axis?.indices, timesMS: axis?.timesMS ?? [],
                                          rotation: pcaRotation, requestedFactors: pcaFactors,
+                                         decomposition: pcaDecomposition,
+                                         matrixType: pcaMatrixType, loading: pcaLoading,
                                          jackknife: runPCAJackknife,
                                          groupID: groupID, store: analysis)
                 } label: { Label("Run", systemImage: "waveform.path.ecg.rectangle") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.pcaRunning)
             }
+            pcaOptionsRow(decomposition: $pcaDecomposition,
+                          matrixType: $pcaMatrixType, loading: $pcaLoading)
             if model.pcaRunning { progressBar(model.pcaProgress) }
             if conditionNames.isEmpty {
                 Text("No shared conditions yet.").font(.caption).foregroundStyle(.secondary)
@@ -405,6 +425,75 @@ struct PCAView: View {
                 Text("Run to plot temporal factor loadings.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func pcaOptionsRow(_ title: String? = nil,
+                               decomposition: Binding<PCADecomposition>,
+                               matrixType: Binding<PCAMatrixType>,
+                               loading: Binding<PCALoading>) -> some View {
+        HStack(spacing: 10) {
+            if let title {
+                Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            Picker("Decomp", selection: decomposition) {
+                ForEach(PCADecomposition.allCases, id: \.self) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+            .frame(width: 110)
+            .help(decompositionHelp(decomposition.wrappedValue))
+
+            Picker("Matrix", selection: matrixType) {
+                ForEach(PCAMatrixType.allCases, id: \.self) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 180)
+            .help(matrixHelp(matrixType.wrappedValue))
+
+            Picker("Loading", selection: loading) {
+                ForEach(PCALoading.allCases, id: \.self) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+            .frame(width: 170)
+            .help(loadingHelp(loading.wrappedValue))
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func decompositionHelp(_ decomposition: PCADecomposition) -> String {
+        switch decomposition {
+        case .svd:
+            return "SVD is the recommended default: exact, deterministic, and best for most ERP PCA runs. Use it unless you specifically want Toolkit-style iterative extraction."
+        case .nipals:
+            return "NIPALS iteratively extracts one component at a time. It can be useful for very large PCA problems or for matching EP Toolkit NIPALS analyses, but SVD is usually preferable when the full matrix is well behaved."
+        }
+    }
+
+    private func matrixHelp(_ matrixType: PCAMatrixType) -> String {
+        switch matrixType {
+        case .cov:
+            return "COV is the recommended default for ERP PCA when amplitude matters: high-variance time points or sensors naturally carry more weight."
+        case .cor:
+            return "COR standardizes variables before PCA. Use it when variables have very different scales and you want shape/correlation structure to dominate over amplitude."
+        case .scp:
+            return "SCP uses uncentered sums of squares/cross-products. It is included for EP Toolkit compatibility; use cautiously because offsets and baselines can influence the solution."
+        }
+    }
+
+    private func loadingHelp(_ loading: PCALoading) -> String {
+        switch loading {
+        case .kaiser:
+            return "Kaiser is the recommended EP Toolkit default before Varimax/Promax-style rotations. It normalizes by communality so variables with broad loadings do not dominate the rotation."
+        case .none:
+            return "None leaves the loading matrix unweighted before rotation. Useful as a sensitivity check, but solutions can be more driven by variables with large communalities."
+        case .covariance:
+            return "Covariance loadings rotate variance-scaled loadings. Use when preserving amplitude/variance influence during rotation is important; compare against Kaiser if interpretation changes."
+        case .curetonMulaik:
+            return "Cureton-Mulaik weighting emphasizes variables aligned with a simple factor direction during rotation. It can sharpen simple structure, especially Varimax-like solutions, but is worth treating as a sensitivity analysis."
         }
     }
 
@@ -514,6 +603,10 @@ struct PCAView: View {
                     model.runSpatialScree(members: members, conditionNames: conditionNames,
                                           timeIndices: currentTimeAxis()?.indices,
                                           firstRotation: pcaRotation, firstFactors: pcaFactors,
+                                          firstDecomposition: dualFirstDecomposition,
+                                          secondDecomposition: dualSecondDecomposition,
+                                          firstMatrixType: dualFirstMatrixType, firstLoading: dualFirstLoading,
+                                          secondMatrixType: dualSecondMatrixType, secondLoading: dualSecondLoading,
                                           groupID: groupID, store: analysis)
                 } label: { Label("Spatial Scree", systemImage: "chart.xyaxis.line") }
                     .buttonStyle(.bordered)
@@ -524,6 +617,10 @@ struct PCAView: View {
                                      timeIndices: axis?.indices, timesMS: axis?.timesMS ?? [],
                                      firstRotation: pcaRotation, secondRotation: dualSecondRotation,
                                      firstFactors: pcaFactors, spatialFactors: dualSpatialFactors,
+                                     firstDecomposition: dualFirstDecomposition,
+                                     secondDecomposition: dualSecondDecomposition,
+                                     firstMatrixType: dualFirstMatrixType, firstLoading: dualFirstLoading,
+                                     secondMatrixType: dualSecondMatrixType, secondLoading: dualSecondLoading,
                                      jackknife: runDualJackknife,
                                      factorNames: study.factors.map(\.name),
                                      conditionMetadata: study.conditionMetadata(for: conditionNames),
@@ -532,6 +629,12 @@ struct PCAView: View {
                 } label: { Label("Run Dual PCA", systemImage: "square.stack.3d.up") }
                     .buttonStyle(.borderedProminent)
                     .disabled(conditionNames.isEmpty || loadedCount == 0 || model.dualRunning)
+            }
+            HStack(spacing: 16) {
+                pcaOptionsRow("First step", decomposition: $dualFirstDecomposition,
+                              matrixType: $dualFirstMatrixType, loading: $dualFirstLoading)
+                pcaOptionsRow("Second step", decomposition: $dualSecondDecomposition,
+                              matrixType: $dualSecondMatrixType, loading: $dualSecondLoading)
             }
 
             if model.spatialScreeRunning { progressBar(model.spatialScreeProgress) }
@@ -929,5 +1032,35 @@ struct PCAView: View {
             get: { min(cursorSample, max(sampleCount - 1, 0)) },
             set: { cursorSample = $0 }
         )
+    }
+}
+
+private extension PCADecomposition {
+    var displayName: String {
+        switch self {
+        case .svd: "SVD"
+        case .nipals: "NIPALS"
+        }
+    }
+}
+
+private extension PCAMatrixType {
+    var displayName: String {
+        switch self {
+        case .cov: "Cov"
+        case .cor: "Cor"
+        case .scp: "SCP"
+        }
+    }
+}
+
+private extension PCALoading {
+    var displayName: String {
+        switch self {
+        case .kaiser: "Kaiser"
+        case .none: "None"
+        case .covariance: "Covariance"
+        case .curetonMulaik: "Cureton-Mulaik"
+        }
     }
 }

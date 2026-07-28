@@ -11,7 +11,14 @@ import Foundation
 
 nonisolated enum DecodingClassifier: String, CaseIterable, Identifiable, Sendable {
     case shrinkageLDA = "Shrinkage LDA"
+    case logisticL2 = "L2 Logistic"
+    case linearSVM = "Linear SVM"
     case nearestCentroid = "Nearest centroid"
+    var id: String { rawValue }
+}
+
+nonisolated enum DecodingRegressor: String, CaseIterable, Identifiable, Sendable {
+    case ridgeElasticNet = "Ridge / Elastic Net"
     var id: String { rawValue }
 }
 
@@ -71,6 +78,41 @@ nonisolated struct DecodingDataset: Sendable {
     }
 }
 
+nonisolated struct DecodingRegressionObservation: Sendable {
+    let subjectIndex: Int
+    let subjectName: String
+    let target: Double
+    let features: [Double]
+    var kind: DecodingObservationKind = .averagedCondition
+}
+
+nonisolated struct DecodingRegressionDataset: Sendable {
+    let observations: [DecodingRegressionObservation]
+    let featureCount: Int
+    var timeLabelMS: Double?
+    var windowStartMS: Double?
+    var windowEndMS: Double?
+
+    func retargeted(_ targetsByObservation: [Double]) -> DecodingRegressionDataset {
+        let rows = zip(observations, targetsByObservation).map { row, target in
+            DecodingRegressionObservation(
+                subjectIndex: row.subjectIndex,
+                subjectName: row.subjectName,
+                target: target,
+                features: row.features,
+                kind: row.kind
+            )
+        }
+        return DecodingRegressionDataset(
+            observations: rows,
+            featureCount: featureCount,
+            timeLabelMS: timeLabelMS,
+            windowStartMS: windowStartMS,
+            windowEndMS: windowEndMS
+        )
+    }
+}
+
 nonisolated struct DecodingPrediction: Identifiable, Sendable {
     let id: Int
     let subjectName: String
@@ -78,6 +120,15 @@ nonisolated struct DecodingPrediction: Identifiable, Sendable {
     let predicted: String
     let fold: Int
     var isCorrect: Bool { actual == predicted }
+}
+
+nonisolated struct DecodingRegressionPrediction: Identifiable, Sendable {
+    let id: Int
+    let subjectName: String
+    let actual: Double
+    let predicted: Double
+    let fold: Int
+    var residual: Double { actual - predicted }
 }
 
 nonisolated struct DecodingResult: Sendable {
@@ -90,6 +141,16 @@ nonisolated struct DecodingResult: Sendable {
     let chance: Double
 }
 
+nonisolated struct DecodingRegressionResult: Sendable {
+    let regressor: DecodingRegressor
+    let predictions: [DecodingRegressionPrediction]
+    let correlation: Double
+    let rSquared: Double
+    let rmse: Double
+    let mae: Double
+    let baselineRMSE: Double
+}
+
 nonisolated struct DecodingWindowResult: Identifiable, Sendable {
     let id = UUID()
     let centerMS: Double
@@ -100,7 +161,24 @@ nonisolated struct DecodingWindowResult: Identifiable, Sendable {
     var accuracy: Double { result.accuracy }
 }
 
+nonisolated struct DecodingRegressionWindowResult: Identifiable, Sendable {
+    let id = UUID()
+    let centerMS: Double
+    let startMS: Double
+    let endMS: Double
+    let result: DecodingRegressionResult
+    var correlation: Double { result.correlation }
+    var rSquared: Double { result.rSquared }
+    var rmse: Double { result.rmse }
+}
+
 nonisolated struct DecodingPermutationResult: Sendable {
+    let observed: Double
+    let nullDistribution: [Double]
+    let pValue: Double
+}
+
+nonisolated struct DecodingRegressionPermutationResult: Sendable {
     let observed: Double
     let nullDistribution: [Double]
     let pValue: Double
@@ -110,6 +188,12 @@ nonisolated struct TemporalGeneralizationResult: Sendable {
     let trainTimesMS: [Double]
     let testTimesMS: [Double]
     let balancedAccuracy: [[Double]]
+}
+
+nonisolated struct RegressionTemporalGeneralizationResult: Sendable {
+    let trainTimesMS: [Double]
+    let testTimesMS: [Double]
+    let correlations: [[Double]]
 }
 
 nonisolated struct DecodingProgress: Sendable {
@@ -407,6 +491,40 @@ nonisolated enum Decoding {
         return makeDataset(observations: observations, labels: labels, timeIndices: timeIndices, timesMS: timesMS)
     }
 
+    static func makeSubjectValueDataset(
+        from input: EPTensor.Input,
+        subjects: [DecodingSubjectInfo],
+        conditionNames: [String],
+        selectedConditions: Set<String>,
+        valuesBySubjectName: [String: Double],
+        timeIndices: [Int],
+        timesMS: [Double]? = nil
+    ) -> DecodingRegressionDataset? {
+        guard !timeIndices.isEmpty else { return nil }
+        let selectedConditionIndices = conditionNames.indices.filter { selectedConditions.contains(conditionNames[$0]) }
+        guard !selectedConditionIndices.isEmpty else { return nil }
+        var observations: [DecodingRegressionObservation] = []
+
+        for (subjectIndex, cells) in input.subjects.enumerated() {
+            guard subjectIndex < subjects.count,
+                  let target = valuesBySubjectName[subjects[subjectIndex].name] else { continue }
+            var features: [Double] = []
+            for conditionIndex in selectedConditionIndices where conditionIndex < cells.count {
+                features += flatten(samples: cells[conditionIndex], timeIndices: timeIndices)
+            }
+            guard !features.isEmpty else { continue }
+            observations.append(DecodingRegressionObservation(
+                subjectIndex: subjectIndex,
+                subjectName: subjects[subjectIndex].name,
+                target: target,
+                features: features,
+                kind: .averagedCondition
+            ))
+        }
+
+        return makeRegressionDataset(observations: observations, timeIndices: timeIndices, timesMS: timesMS)
+    }
+
     static func makeEpochDataset(
         epochs: [DecodingEpoch],
         labels: [String],
@@ -501,6 +619,77 @@ nonisolated enum Decoding {
         )
     }
 
+    static func leaveOneSubjectOutRegression(
+        _ dataset: DecodingRegressionDataset,
+        regressor: DecodingRegressor = .ridgeElasticNet,
+        concurrent: Bool = true,
+        progress: (@Sendable (DecodingProgress) -> Void)? = nil
+    ) throws -> DecodingRegressionResult {
+        try validate(dataset)
+        let subjects = Array(Set(dataset.observations.map(\.subjectIndex))).sorted()
+        guard subjects.count >= 3 else { throw DecodingError.insufficientSubjects }
+
+        progress?(DecodingProgress(
+            completed: 0,
+            total: subjects.count,
+            message: "Starting leave-one-subject-out prediction with \(subjects.count) folds, "
+                + "\(dataset.observations.count) subjects, \(dataset.featureCount.formatted()) features, "
+                + "model \(regressor.rawValue), and \(concurrent ? "multithreaded" : "serial") fold execution."
+        ))
+
+        let foldRunner: (Int, Int) throws -> [DecodingRegressionPrediction] = { fold, heldOutSubject in
+            let train = dataset.observations.filter { $0.subjectIndex != heldOutSubject }
+            let test = dataset.observations.filter { $0.subjectIndex == heldOutSubject }
+            let model = try trainRegressionModel(regressor, observations: train)
+            return test.enumerated().map { offset, observation in
+                DecodingRegressionPrediction(
+                    id: fold * 100_000 + offset,
+                    subjectName: observation.subjectName,
+                    actual: observation.target,
+                    predicted: model.predict(observation.features),
+                    fold: fold + 1
+                )
+            }
+        }
+
+        let predictionsByFold: [[DecodingRegressionPrediction]]
+        if concurrent {
+            predictionsByFold = try concurrentMap(Array(subjects.enumerated()), progress: progress) { foldAndSubject in
+                let (fold, subject) = foldAndSubject
+                let subjectName = dataset.observations.first(where: { $0.subjectIndex == subject })?.subjectName ?? "subject \(subject + 1)"
+                let out = try foldRunner(fold, subject)
+                return (fold, out, "Completed fold \(fold + 1) of \(subjects.count): held out \(subjectName), predicted \(out.count) behavioral value.")
+            }
+        } else {
+            var out: [[DecodingRegressionPrediction]] = []
+            for (fold, subject) in subjects.enumerated() {
+                let subjectName = dataset.observations.first(where: { $0.subjectIndex == subject })?.subjectName ?? "subject \(subject + 1)"
+                progress?(DecodingProgress(
+                    completed: fold,
+                    total: subjects.count,
+                    message: "Fold \(fold + 1) of \(subjects.count): holding out \(subjectName); preprocessing is fit on training subjects only."
+                ))
+                out.append(try foldRunner(fold, subject))
+                progress?(DecodingProgress(
+                    completed: fold + 1,
+                    total: subjects.count,
+                    message: "Completed fold \(fold + 1) of \(subjects.count): held-out behavioral prediction for \(subjectName) is in."
+                ))
+            }
+            predictionsByFold = out
+        }
+
+        progress?(DecodingProgress(
+            completed: subjects.count,
+            total: subjects.count,
+            message: "Aggregating held-out behavioral predictions into correlation, R-squared, RMSE, and MAE."
+        ))
+        return summarize(
+            regressor: regressor,
+            predictions: predictionsByFold.flatMap { $0 }.sorted { $0.id < $1.id }
+        )
+    }
+
     static func timeResolved(
         datasets: [DecodingDataset],
         classifier: DecodingClassifier,
@@ -508,6 +697,15 @@ nonisolated enum Decoding {
         progress: (@Sendable (DecodingProgress) -> Void)? = nil
     ) throws -> [DecodingWindowResult] {
         try decodeWindows(datasets: datasets, classifier: classifier, concurrent: concurrent, progress: progress)
+    }
+
+    static func timeResolvedRegression(
+        datasets: [DecodingRegressionDataset],
+        regressor: DecodingRegressor,
+        concurrent: Bool = true,
+        progress: (@Sendable (DecodingProgress) -> Void)? = nil
+    ) throws -> [DecodingRegressionWindowResult] {
+        try decodeRegressionWindows(datasets: datasets, regressor: regressor, concurrent: concurrent, progress: progress)
     }
 
     static func permutationTest(
@@ -549,6 +747,46 @@ nonisolated enum Decoding {
         return DecodingPermutationResult(observed: observedValue, nullDistribution: null, pValue: p)
     }
 
+    static func regressionPermutationTest(
+        dataset: DecodingRegressionDataset,
+        regressor: DecodingRegressor,
+        observed: DecodingRegressionResult? = nil,
+        permutations: Int,
+        concurrent: Bool = true,
+        seed: UInt64 = 0xDEC0DE,
+        progress: (@Sendable (DecodingProgress) -> Void)? = nil
+    ) throws -> DecodingRegressionPermutationResult {
+        let observedValue = try (observed ?? leaveOneSubjectOutRegression(dataset, regressor: regressor, concurrent: concurrent)).correlation
+        guard permutations > 0 else {
+            return DecodingRegressionPermutationResult(observed: observedValue, nullDistribution: [], pValue: .nan)
+        }
+        let jobs = Array(0..<permutations)
+        let null: [Double]
+        if concurrent {
+            null = try concurrentMap(jobs, progress: progress) { index in
+                var rng = SplitMix64(seed: seed &+ UInt64(index))
+                let targets = shuffledTargets(dataset.observations.map(\.target), rng: &rng)
+                let permuted = dataset.retargeted(targets)
+                let metric = try leaveOneSubjectOutRegression(permuted, regressor: regressor, concurrent: false).correlation
+                return (index, metric, "Permutation \(index + 1) of \(permutations): null prediction r \(format(metric)).")
+            }
+        } else {
+            var out: [Double] = []
+            for index in jobs {
+                var rng = SplitMix64(seed: seed &+ UInt64(index))
+                let targets = shuffledTargets(dataset.observations.map(\.target), rng: &rng)
+                let permuted = dataset.retargeted(targets)
+                out.append(try leaveOneSubjectOutRegression(permuted, regressor: regressor, concurrent: false).correlation)
+                progress?(DecodingProgress(completed: index + 1, total: permutations, message: "Completed permutation \(index + 1) of \(permutations)."))
+            }
+            null = out
+        }
+        let observedMagnitude = abs(observedValue)
+        let ge = null.filter { abs($0) >= observedMagnitude }.count
+        let p = Double(ge + 1) / Double(permutations + 1)
+        return DecodingRegressionPermutationResult(observed: observedValue, nullDistribution: null, pValue: p)
+    }
+
     static func temporalGeneralization(
         datasets: [DecodingDataset],
         classifier: DecodingClassifier,
@@ -586,6 +824,43 @@ nonisolated enum Decoding {
         )
     }
 
+    static func regressionTemporalGeneralization(
+        datasets: [DecodingRegressionDataset],
+        regressor: DecodingRegressor,
+        concurrent: Bool = true,
+        progress: (@Sendable (DecodingProgress) -> Void)? = nil
+    ) throws -> RegressionTemporalGeneralizationResult {
+        guard !datasets.isEmpty else { throw DecodingError.empty }
+        let jobs = (0..<datasets.count).flatMap { train in (0..<datasets.count).map { (train, $0) } }
+        let cells: [((Int, Int), Double)]
+        if concurrent {
+            cells = try concurrentMap(jobs, progress: progress) { pair in
+                let metric = try crossTemporalRegressionLOSO(
+                    trainDataset: datasets[pair.0],
+                    testDataset: datasets[pair.1],
+                    regressor: regressor
+                )
+                return (pair.0 * datasets.count + pair.1, (pair, metric), "Temporal prediction cell train \(pair.0 + 1), test \(pair.1 + 1): r \(format(metric)).")
+            }
+        } else {
+            var out: [((Int, Int), Double)] = []
+            for (index, pair) in jobs.enumerated() {
+                let metric = try crossTemporalRegressionLOSO(trainDataset: datasets[pair.0], testDataset: datasets[pair.1], regressor: regressor)
+                out.append((pair, metric))
+                progress?(DecodingProgress(completed: index + 1, total: jobs.count, message: "Completed temporal prediction cell \(index + 1) of \(jobs.count)."))
+            }
+            cells = out
+        }
+
+        var matrix = Array(repeating: Array(repeating: 0.0, count: datasets.count), count: datasets.count)
+        for (pair, metric) in cells { matrix[pair.0][pair.1] = metric }
+        return RegressionTemporalGeneralizationResult(
+            trainTimesMS: datasets.map { $0.timeLabelMS ?? 0 },
+            testTimesMS: datasets.map { $0.timeLabelMS ?? 0 },
+            correlations: matrix
+        )
+    }
+
     static func summarize(
         classifier: DecodingClassifier,
         labels: [String],
@@ -619,10 +894,55 @@ nonisolated enum Decoding {
         )
     }
 
+    static func summarize(
+        regressor: DecodingRegressor,
+        predictions: [DecodingRegressionPrediction]
+    ) -> DecodingRegressionResult {
+        let actual = predictions.map(\.actual)
+        let predicted = predictions.map(\.predicted)
+        let residuals = zip(actual, predicted).map { $0 - $1 }
+        let mse = residuals.map { $0 * $0 }.reduce(0, +) / Double(max(1, residuals.count))
+        let mae = residuals.map { abs($0) }.reduce(0, +) / Double(max(1, residuals.count))
+        let meanActual = actual.isEmpty ? 0 : actual.reduce(0, +) / Double(actual.count)
+        let baselineMSE = actual.map { value in
+            let d = value - meanActual
+            return d * d
+        }.reduce(0, +) / Double(max(1, actual.count))
+        let totalSS: Double = actual.map { value in
+            let d = value - meanActual
+            return d * d
+        }.reduce(0.0, +)
+        let residualSS: Double = residuals.map { $0 * $0 }.reduce(0.0, +)
+        let r2 = totalSS > 1e-12 ? 1 - residualSS / totalSS : .nan
+        return DecodingRegressionResult(
+            regressor: regressor,
+            predictions: predictions,
+            correlation: pearson(actual, predicted),
+            rSquared: r2,
+            rmse: mse.squareRoot(),
+            mae: mae,
+            baselineRMSE: baselineMSE.squareRoot()
+        )
+    }
+
     static func predictionsCSV(_ result: DecodingResult) -> String {
         var lines = ["Fold,Subject,Actual,Predicted,Correct"]
         for p in result.predictions {
             lines.append([String(p.fold), escape(p.subjectName), escape(p.actual), escape(p.predicted), p.isCorrect ? "1" : "0"].joined(separator: ","))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func regressionPredictionsCSV(_ result: DecodingRegressionResult) -> String {
+        var lines = ["Fold,Subject,Actual,Predicted,Residual"]
+        for p in result.predictions {
+            lines.append([
+                String(p.fold),
+                escape(p.subjectName),
+                format(p.actual),
+                format(p.predicted),
+                format(p.residual)
+            ].joined(separator: ","))
         }
         return lines.joined(separator: "\n")
     }
@@ -646,10 +966,30 @@ nonisolated enum Decoding {
         return lines.joined(separator: "\n")
     }
 
+    static func regressionCurveCSV(_ windows: [DecodingRegressionWindowResult]) -> String {
+        var lines = ["Center_ms,Start_ms,End_ms,Correlation,RSquared,RMSE,MAE,BaselineRMSE"]
+        for w in windows {
+            lines.append([
+                format(w.centerMS), format(w.startMS), format(w.endMS),
+                format(w.correlation), format(w.rSquared), format(w.result.rmse),
+                format(w.result.mae), format(w.result.baselineRMSE)
+            ].joined(separator: ","))
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func temporalGeneralizationCSV(_ result: TemporalGeneralizationResult) -> String {
         var lines = [(["Train_ms\\Test_ms"] + result.testTimesMS.map(format)).joined(separator: ",")]
         for (row, train) in result.trainTimesMS.enumerated() {
             lines.append(([format(train)] + result.balancedAccuracy[row].map(format)).joined(separator: ","))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func regressionTemporalGeneralizationCSV(_ result: RegressionTemporalGeneralizationResult) -> String {
+        var lines = [(["Train_ms\\Test_ms"] + result.testTimesMS.map(format)).joined(separator: ",")]
+        for (row, train) in result.trainTimesMS.enumerated() {
+            lines.append(([format(train)] + result.correlations[row].map(format)).joined(separator: ","))
         }
         return lines.joined(separator: "\n")
     }
@@ -664,7 +1004,7 @@ nonisolated enum Decoding {
         let jobs = Array(datasets.enumerated())
         if concurrent {
             return try concurrentMap(jobs, progress: progress) { index, dataset in
-                let result = try leaveOneSubjectOut(dataset, classifier: classifier, concurrent: true)
+                let result = try leaveOneSubjectOut(dataset, classifier: classifier, concurrent: false)
                 let center = dataset.timeLabelMS ?? 0
                 let window = DecodingWindowResult(
                     centerMS: center,
@@ -681,6 +1021,38 @@ nonisolated enum Decoding {
                 let center = dataset.timeLabelMS ?? 0
                 out.append(DecodingWindowResult(centerMS: center, startMS: dataset.windowStartMS ?? center, endMS: dataset.windowEndMS ?? center, result: result))
                 progress?(DecodingProgress(completed: index + 1, total: datasets.count, message: "Decoded window \(index + 1) of \(datasets.count)."))
+            }
+            return out
+        }
+    }
+
+    private static func decodeRegressionWindows(
+        datasets: [DecodingRegressionDataset],
+        regressor: DecodingRegressor,
+        concurrent: Bool,
+        progress: (@Sendable (DecodingProgress) -> Void)?
+    ) throws -> [DecodingRegressionWindowResult] {
+        guard !datasets.isEmpty else { throw DecodingError.empty }
+        let jobs = Array(datasets.enumerated())
+        if concurrent {
+            return try concurrentMap(jobs, progress: progress) { index, dataset in
+                let result = try leaveOneSubjectOutRegression(dataset, regressor: regressor, concurrent: false)
+                let center = dataset.timeLabelMS ?? 0
+                let window = DecodingRegressionWindowResult(
+                    centerMS: center,
+                    startMS: dataset.windowStartMS ?? center,
+                    endMS: dataset.windowEndMS ?? center,
+                    result: result
+                )
+                return (index, window, "Predicted window \(index + 1) of \(datasets.count) centered at \(format(center)) ms: r \(format(result.correlation)).")
+            }
+        } else {
+            var out: [DecodingRegressionWindowResult] = []
+            for (index, dataset) in jobs {
+                let result = try leaveOneSubjectOutRegression(dataset, regressor: regressor, concurrent: false)
+                let center = dataset.timeLabelMS ?? 0
+                out.append(DecodingRegressionWindowResult(centerMS: center, startMS: dataset.windowStartMS ?? center, endMS: dataset.windowEndMS ?? center, result: result))
+                progress?(DecodingProgress(completed: index + 1, total: datasets.count, message: "Predicted window \(index + 1) of \(datasets.count)."))
             }
             return out
         }
@@ -711,9 +1083,44 @@ nonisolated enum Decoding {
         return summarize(classifier: classifier, labels: trainDataset.labels, predictions: predictions).balancedAccuracy
     }
 
+    private static func crossTemporalRegressionLOSO(
+        trainDataset: DecodingRegressionDataset,
+        testDataset: DecodingRegressionDataset,
+        regressor: DecodingRegressor
+    ) throws -> Double {
+        guard trainDataset.featureCount == testDataset.featureCount else { throw DecodingError.dimensionMismatch }
+        try validate(trainDataset)
+        let subjects = Array(Set(trainDataset.observations.map(\.subjectIndex))).sorted()
+        let predictions = try subjects.enumerated().flatMap { fold, heldOut -> [DecodingRegressionPrediction] in
+            let train = trainDataset.observations.filter { $0.subjectIndex != heldOut }
+            let test = testDataset.observations.filter { $0.subjectIndex == heldOut }
+            let model = try trainRegressionModel(regressor, observations: train)
+            return test.enumerated().map { offset, observation in
+                DecodingRegressionPrediction(
+                    id: fold * 100_000 + offset,
+                    subjectName: observation.subjectName,
+                    actual: observation.target,
+                    predicted: model.predict(observation.features),
+                    fold: fold + 1
+                )
+            }
+        }
+        return summarize(regressor: regressor, predictions: predictions).correlation
+    }
+
     private static func validate(_ dataset: DecodingDataset) throws {
         guard !dataset.observations.isEmpty else { throw DecodingError.empty }
         guard dataset.labels.count >= 2 else { throw DecodingError.oneClass }
+        guard dataset.observations.allSatisfy({ $0.features.count == dataset.featureCount }) else {
+            throw DecodingError.dimensionMismatch
+        }
+    }
+
+    private static func validate(_ dataset: DecodingRegressionDataset) throws {
+        guard !dataset.observations.isEmpty else { throw DecodingError.empty }
+        guard Set(dataset.observations.map(\.target)).count >= 2 else {
+            throw DecodingError.unsupported("Continuous prediction needs variation in the behavioral target.")
+        }
         guard dataset.observations.allSatisfy({ $0.features.count == dataset.featureCount }) else {
             throw DecodingError.dimensionMismatch
         }
@@ -723,8 +1130,19 @@ nonisolated enum Decoding {
         switch classifier {
         case .nearestCentroid:
             return try CentroidModel.train(observations, labels: labels)
+        case .logisticL2:
+            return try LogisticRegressionModel.train(observations, labels: labels)
+        case .linearSVM:
+            return try LinearSVMModel.train(observations, labels: labels)
         case .shrinkageLDA:
             return try ShrinkageLDAModel.train(observations, labels: labels)
+        }
+    }
+
+    private static func trainRegressionModel(_ regressor: DecodingRegressor, observations: [DecodingRegressionObservation]) throws -> DecodingRegressionModel {
+        switch regressor {
+        case .ridgeElasticNet:
+            return try RidgeElasticNetModel.train(observations)
         }
     }
 
@@ -762,6 +1180,26 @@ nonisolated enum Decoding {
         )
     }
 
+    private static func makeRegressionDataset(
+        observations: [DecodingRegressionObservation],
+        timeIndices: [Int],
+        timesMS: [Double]?
+    ) -> DecodingRegressionDataset? {
+        guard let featureCount = observations.first?.features.count,
+              observations.allSatisfy({ $0.features.count == featureCount }) else { return nil }
+        let windowTimes = timeIndices.compactMap { index -> Double? in
+            guard let timesMS, index < timesMS.count else { return nil }
+            return timesMS[index]
+        }
+        return DecodingRegressionDataset(
+            observations: observations,
+            featureCount: featureCount,
+            timeLabelMS: windowTimes.isEmpty ? nil : windowTimes.reduce(0, +) / Double(windowTimes.count),
+            windowStartMS: windowTimes.min(),
+            windowEndMS: windowTimes.max()
+        )
+    }
+
     private static func orderedUnique(_ values: [String]) -> [String] {
         var seen = Set<String>()
         var out: [String] = []
@@ -781,6 +1219,35 @@ nonisolated enum Decoding {
         return out
     }
 
+    private static func shuffledTargets(_ targets: [Double], rng: inout SplitMix64) -> [Double] {
+        var out = targets
+        guard out.count > 1 else { return out }
+        for i in stride(from: out.count - 1, through: 1, by: -1) {
+            let j = Int(rng.next() % UInt64(i + 1))
+            out.swapAt(i, j)
+        }
+        return out
+    }
+
+    private static func pearson(_ x: [Double], _ y: [Double]) -> Double {
+        let n = min(x.count, y.count)
+        guard n >= 2 else { return .nan }
+        let mx = x.prefix(n).reduce(0, +) / Double(n)
+        let my = y.prefix(n).reduce(0, +) / Double(n)
+        var num = 0.0
+        var sx = 0.0
+        var sy = 0.0
+        for i in 0..<n {
+            let dx = x[i] - mx
+            let dy = y[i] - my
+            num += dx * dy
+            sx += dx * dx
+            sy += dy * dy
+        }
+        let denom = (sx * sy).squareRoot()
+        return denom > 1e-12 ? num / denom : .nan
+    }
+
     private static func concurrentMap<Input, Output>(
         _ inputs: [Input],
         progress: (@Sendable (DecodingProgress) -> Void)?,
@@ -792,7 +1259,7 @@ nonisolated enum Decoding {
         var firstError: Error?
         var completed = 0
         var nextIndex = 0
-        let workerCount = min(inputs.count, decodingWorkerCount())
+        let workerCount = WorkerPool.maxWorkers(for: inputs.count)
         let group = DispatchGroup()
         let queue = DispatchQueue(label: "DENNIS.Decoding.Workers", qos: .userInitiated, attributes: .concurrent)
 
@@ -836,10 +1303,6 @@ nonisolated enum Decoding {
         return outputs.compactMap { $0 }
     }
 
-    private static func decodingWorkerCount() -> Int {
-        max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
-    }
-
     nonisolated static func escape(_ value: String) -> String {
         if value.contains(",") || value.contains("\"") || value.contains("\n") {
             return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
@@ -860,27 +1323,39 @@ private nonisolated protocol DecodingModel: Sendable {
     func predict(_ features: [Double]) -> String
 }
 
+private nonisolated protocol DecodingRegressionModel: Sendable {
+    func predict(_ features: [Double]) -> Double
+}
+
 private nonisolated struct Standardizer: Sendable {
     let mean: [Double]
     let scale: [Double]
 
     static func fit(_ observations: [DecodingObservation]) throws -> Standardizer {
-        guard let featureCount = observations.first?.features.count else { throw Decoding.DecodingError.empty }
+        try fit(features: observations.map(\.features))
+    }
+
+    static func fit(_ observations: [DecodingRegressionObservation]) throws -> Standardizer {
+        try fit(features: observations.map(\.features))
+    }
+
+    static func fit(features rows: [[Double]]) throws -> Standardizer {
+        guard let featureCount = rows.first?.count else { throw Decoding.DecodingError.empty }
         var mean = Array(repeating: 0.0, count: featureCount)
-        for observation in observations {
-            for i in 0..<featureCount { mean[i] += observation.features[i] }
+        for row in rows {
+            for i in 0..<featureCount { mean[i] += row[i] }
         }
-        let invN = 1.0 / Double(max(1, observations.count))
+        let invN = 1.0 / Double(max(1, rows.count))
         for i in 0..<featureCount { mean[i] *= invN }
 
         var variance = Array(repeating: 0.0, count: featureCount)
-        for observation in observations {
+        for row in rows {
             for i in 0..<featureCount {
-                let d = observation.features[i] - mean[i]
+                let d = row[i] - mean[i]
                 variance[i] += d * d
             }
         }
-        let denom = Double(max(1, observations.count - 1))
+        let denom = Double(max(1, rows.count - 1))
         let scale = variance.map { value in
             let sd = (value / denom).squareRoot()
             return sd > 1e-12 ? sd : 1
@@ -890,6 +1365,80 @@ private nonisolated struct Standardizer: Sendable {
 
     func transform(_ features: [Double]) -> [Double] {
         features.indices.map { (features[$0] - mean[$0]) / scale[$0] }
+    }
+}
+
+private nonisolated struct RidgeElasticNetModel: DecodingRegressionModel {
+    let weights: [Double]
+    let intercept: Double
+    let targetMean: Double
+    let targetScale: Double
+    let standardizer: Standardizer
+
+    static func train(_ observations: [DecodingRegressionObservation]) throws -> RidgeElasticNetModel {
+        let standardizer = try Standardizer.fit(observations)
+        let featureCount = observations.first?.features.count ?? 0
+        let rows = observations.map { standardizer.transform($0.features) }
+        let targets = observations.map(\.target)
+        let n = Double(max(1, observations.count))
+        let targetMean = targets.reduce(0, +) / n
+        let targetVariance = targets.map { value in
+            let d = value - targetMean
+            return d * d
+        }.reduce(0, +) / Double(max(1, observations.count - 1))
+        let targetScale = targetVariance.squareRoot() > 1e-12 ? targetVariance.squareRoot() : 1
+        let y = targets.map { ($0 - targetMean) / targetScale }
+
+        let lambda = max(0.05, 1.0 / n)
+        let l1Ratio = 0.15
+        let l2 = lambda * (1 - l1Ratio)
+        let l1 = lambda * l1Ratio
+        var weights = Array(repeating: 0.0, count: featureCount)
+        var intercept = 0.0
+        var step = 0.2
+
+        for iteration in 0..<900 {
+            var gradW = Array(repeating: 0.0, count: featureCount)
+            var gradB = 0.0
+            for rowIndex in rows.indices {
+                let prediction = dot(weights, rows[rowIndex]) + intercept
+                let error = prediction - y[rowIndex]
+                gradB += error
+                for feature in 0..<featureCount { gradW[feature] += error * rows[rowIndex][feature] }
+            }
+            gradB /= n
+            intercept -= step * gradB
+            for feature in 0..<featureCount {
+                let gradient = gradW[feature] / n + l2 * weights[feature]
+                weights[feature] = softThreshold(weights[feature] - step * gradient, step * l1)
+            }
+            if iteration > 0 && iteration % 150 == 0 { step *= 0.7 }
+        }
+
+        return RidgeElasticNetModel(
+            weights: weights,
+            intercept: intercept,
+            targetMean: targetMean,
+            targetScale: targetScale,
+            standardizer: standardizer
+        )
+    }
+
+    func predict(_ features: [Double]) -> Double {
+        let z = standardizer.transform(features)
+        return (Self.dot(weights, z) + intercept) * targetScale + targetMean
+    }
+
+    private static func softThreshold(_ value: Double, _ threshold: Double) -> Double {
+        if value > threshold { return value - threshold }
+        if value < -threshold { return value + threshold }
+        return 0
+    }
+
+    private static func dot(_ left: [Double], _ right: [Double]) -> Double {
+        var sum = 0.0
+        for i in 0..<min(left.count, right.count) { sum += left[i] * right[i] }
+        return sum
     }
 }
 
@@ -1006,5 +1555,268 @@ private nonisolated struct ShrinkageLDAModel: DecodingModel {
             }
         }
         return bestLabel
+    }
+}
+
+private nonisolated struct LogisticRegressionModel: DecodingModel {
+    let labels: [String]
+    let weights: [[Double]]
+    let intercepts: [Double]
+    let standardizer: Standardizer
+
+    static func train(_ observations: [DecodingObservation], labels: [String]) throws -> LogisticRegressionModel {
+        let standardizer = try Standardizer.fit(observations)
+        let featureCount = observations.first?.features.count ?? 0
+        let labelIndex = Dictionary(uniqueKeysWithValues: labels.enumerated().map { ($0.element, $0.offset) })
+        var counts = Array(repeating: 0, count: labels.count)
+        var rows: [(label: Int, z: [Double])] = []
+
+        for observation in observations {
+            guard let label = labelIndex[observation.label] else { continue }
+            counts[label] += 1
+            rows.append((label, standardizer.transform(observation.features)))
+        }
+        for (index, count) in counts.enumerated() where count == 0 {
+            throw Decoding.DecodingError.foldMissingClass(labels[index])
+        }
+
+        if labels.count == 2 {
+            return trainBinary(labels: labels, rows: rows, counts: counts, featureCount: featureCount, standardizer: standardizer)
+        }
+
+        let n = Double(max(1, rows.count))
+        let lambda = 1.0 / n
+        var weights = Array(repeating: Array(repeating: 0.0, count: featureCount), count: labels.count)
+        var intercepts = counts.map { count in
+            let p = min(0.99, max(0.01, Double(count) / n))
+            return log(p / (1 - p))
+        }
+
+        for label in labels.indices {
+            var w = weights[label]
+            var b = intercepts[label]
+            var step = 0.35
+            for iteration in 0..<700 {
+                var gradW = Array(repeating: 0.0, count: featureCount)
+                var gradB = 0.0
+                for row in rows {
+                    let y = row.label == label ? 1.0 : 0.0
+                    let p = sigmoid(dot(w, row.z) + b)
+                    let error = p - y
+                    gradB += error
+                    for i in 0..<featureCount { gradW[i] += error * row.z[i] }
+                }
+                gradB /= n
+                for i in 0..<featureCount {
+                    gradW[i] = gradW[i] / n + lambda * w[i]
+                    w[i] -= step * gradW[i]
+                }
+                b -= step * gradB
+                if iteration > 0 && iteration % 100 == 0 { step *= 0.7 }
+            }
+            weights[label] = w
+            intercepts[label] = b
+        }
+
+        return LogisticRegressionModel(labels: labels, weights: weights, intercepts: intercepts, standardizer: standardizer)
+    }
+
+    private static func trainBinary(
+        labels: [String],
+        rows: [(label: Int, z: [Double])],
+        counts: [Int],
+        featureCount: Int,
+        standardizer: Standardizer
+    ) -> LogisticRegressionModel {
+        let n = Double(max(1, rows.count))
+        let lambda = 1.0 / n
+        var w = Array(repeating: 0.0, count: featureCount)
+        let positiveP = min(0.99, max(0.01, Double(counts[1]) / n))
+        var b = log(positiveP / (1 - positiveP))
+        var step = 0.35
+
+        for iteration in 0..<450 {
+            var gradW = Array(repeating: 0.0, count: featureCount)
+            var gradB = 0.0
+            for row in rows {
+                let y = row.label == 1 ? 1.0 : 0.0
+                let p = sigmoid(dot(w, row.z) + b)
+                let error = p - y
+                gradB += error
+                for i in 0..<featureCount { gradW[i] += error * row.z[i] }
+            }
+            gradB /= n
+            var maxStep = abs(step * gradB)
+            for i in 0..<featureCount {
+                gradW[i] = gradW[i] / n + lambda * w[i]
+                let delta = step * gradW[i]
+                w[i] -= delta
+                maxStep = max(maxStep, abs(delta))
+            }
+            b -= step * gradB
+            if maxStep < 1e-6 { break }
+            if iteration > 0 && iteration % 100 == 0 { step *= 0.7 }
+        }
+
+        return LogisticRegressionModel(
+            labels: labels,
+            weights: [w.map { -$0 }, w],
+            intercepts: [-b, b],
+            standardizer: standardizer
+        )
+    }
+
+    func predict(_ features: [Double]) -> String {
+        let z = standardizer.transform(features)
+        var bestLabel = labels.first ?? ""
+        var bestScore = -Double.infinity
+        for label in labels.indices {
+            let score = Self.dot(weights[label], z) + intercepts[label]
+            if score > bestScore {
+                bestScore = score
+                bestLabel = labels[label]
+            }
+        }
+        return bestLabel
+    }
+
+    private static func sigmoid(_ value: Double) -> Double {
+        if value >= 35 { return 1 }
+        if value <= -35 { return 0 }
+        return 1 / (1 + exp(-value))
+    }
+
+    private static func dot(_ left: [Double], _ right: [Double]) -> Double {
+        var sum = 0.0
+        for i in 0..<min(left.count, right.count) { sum += left[i] * right[i] }
+        return sum
+    }
+}
+
+private nonisolated struct LinearSVMModel: DecodingModel {
+    let labels: [String]
+    let weights: [[Double]]
+    let intercepts: [Double]
+    let standardizer: Standardizer
+
+    static func train(_ observations: [DecodingObservation], labels: [String]) throws -> LinearSVMModel {
+        let standardizer = try Standardizer.fit(observations)
+        let featureCount = observations.first?.features.count ?? 0
+        let labelIndex = Dictionary(uniqueKeysWithValues: labels.enumerated().map { ($0.element, $0.offset) })
+        var counts = Array(repeating: 0, count: labels.count)
+        var rows: [(label: Int, z: [Double])] = []
+
+        for observation in observations {
+            guard let label = labelIndex[observation.label] else { continue }
+            counts[label] += 1
+            rows.append((label, standardizer.transform(observation.features)))
+        }
+        for (index, count) in counts.enumerated() where count == 0 {
+            throw Decoding.DecodingError.foldMissingClass(labels[index])
+        }
+
+        if labels.count == 2 {
+            return trainBinary(labels: labels, rows: rows, featureCount: featureCount, standardizer: standardizer)
+        }
+
+        let n = Double(max(1, rows.count))
+        let lambda = 1.0 / n
+        var weights = Array(repeating: Array(repeating: 0.0, count: featureCount), count: labels.count)
+        var intercepts = Array(repeating: 0.0, count: labels.count)
+
+        for label in labels.indices {
+            var w = weights[label]
+            var b = 0.0
+            var step = 0.25
+            for iteration in 0..<800 {
+                var gradW = w.map { lambda * $0 }
+                var gradB = 0.0
+                for row in rows {
+                    let y = row.label == label ? 1.0 : -1.0
+                    let margin = y * (dot(w, row.z) + b)
+                    if margin < 1 {
+                        gradB -= y
+                        for feature in 0..<featureCount {
+                            gradW[feature] -= y * row.z[feature]
+                        }
+                    }
+                }
+                gradB /= n
+                for feature in 0..<featureCount {
+                    w[feature] -= step * (gradW[feature] / n)
+                }
+                b -= step * gradB
+                if iteration > 0 && iteration % 120 == 0 { step *= 0.72 }
+            }
+            weights[label] = w
+            intercepts[label] = b
+        }
+
+        return LinearSVMModel(labels: labels, weights: weights, intercepts: intercepts, standardizer: standardizer)
+    }
+
+    private static func trainBinary(
+        labels: [String],
+        rows: [(label: Int, z: [Double])],
+        featureCount: Int,
+        standardizer: Standardizer
+    ) -> LinearSVMModel {
+        let n = Double(max(1, rows.count))
+        let lambda = 1.0 / n
+        var w = Array(repeating: 0.0, count: featureCount)
+        var b = 0.0
+        var step = 0.25
+
+        for iteration in 0..<360 {
+            var gradW = w.map { lambda * $0 }
+            var gradB = 0.0
+            for row in rows {
+                let y = row.label == 1 ? 1.0 : -1.0
+                let margin = y * (dot(w, row.z) + b)
+                if margin < 1 {
+                    gradB -= y
+                    for feature in 0..<featureCount {
+                        gradW[feature] -= y * row.z[feature]
+                    }
+                }
+            }
+            gradB /= n
+            var maxStep = abs(step * gradB)
+            for feature in 0..<featureCount {
+                let delta = step * (gradW[feature] / n)
+                w[feature] -= delta
+                maxStep = max(maxStep, abs(delta))
+            }
+            b -= step * gradB
+            if maxStep < 1e-6 { break }
+            if iteration > 0 && iteration % 90 == 0 { step *= 0.72 }
+        }
+
+        return LinearSVMModel(
+            labels: labels,
+            weights: [w.map { -$0 }, w],
+            intercepts: [-b, b],
+            standardizer: standardizer
+        )
+    }
+
+    func predict(_ features: [Double]) -> String {
+        let z = standardizer.transform(features)
+        var bestLabel = labels.first ?? ""
+        var bestScore = -Double.infinity
+        for label in labels.indices {
+            let score = Self.dot(weights[label], z) + intercepts[label]
+            if score > bestScore {
+                bestScore = score
+                bestLabel = labels[label]
+            }
+        }
+        return bestLabel
+    }
+
+    private static func dot(_ left: [Double], _ right: [Double]) -> Double {
+        var sum = 0.0
+        for i in 0..<min(left.count, right.count) { sum += left[i] * right[i] }
+        return sum
     }
 }
