@@ -135,6 +135,13 @@ final class AnalysisStore {
         var id: String { rawValue }
     }
 
+    enum DerivedReconstructionOutput: String, CaseIterable, Identifiable, Sendable {
+        case includedChannels = "Included channels"
+        case clusterAverages = "Cluster averages"
+
+        var id: String { rawValue }
+    }
+
     struct DerivedDataItem: Identifiable {
         enum Unit: String, CaseIterable, Identifiable, Sendable {
             case component = "Component units"
@@ -317,21 +324,24 @@ final class AnalysisStore {
         from bundle: DualBundle,
         factor: TwoStepFactor,
         scope: DerivedReconstructionScope,
-        threshold: Double
+        threshold: Double,
+        output: DerivedReconstructionOutput = .includedChannels
     ) -> DerivedDataItem? {
         guard let built = DerivedDataBuilder.reconstructedDualFactor(
             bundle: bundle,
             factor: factor,
             scope: scope,
-            threshold: threshold
+            threshold: threshold,
+            output: output
         ) else {
             return nil
         }
         let label = label(for: factor.name)
         let scopeSuffix = scope == .fullFactor ? "full" : "selected electrodes"
+        let outputSuffix = output == .includedChannels ? scopeSuffix : "\(scopeSuffix), cluster averages"
         let item = DerivedDataItem(
             id: UUID(),
-            name: "\(label) reconstructed (\(scopeSuffix))",
+            name: "\(label) reconstructed (\(outputSuffix))",
             kind: .reconstructedDualFactor,
             sourceGroupID: bundle.groupID,
             sourceGroupLabel: bundle.groupLabel,
@@ -343,10 +353,17 @@ final class AnalysisStore {
             conditionMetadata: bundle.conditionMetadata,
             input: built.input,
             channelIndices: built.channelIndices,
-            nativeUnit: .component,
+            nativeUnit: .microvolts,
             microvoltScale: built.microvoltScale,
             factorPreview: built.factorPreview,
-            provenance: provenance(for: factor, bundle: bundle, scope: scope, threshold: threshold, channelCount: built.input.nChannels)
+            provenance: provenance(
+                for: factor,
+                bundle: bundle,
+                scope: scope,
+                threshold: threshold,
+                output: output,
+                channelCount: built.input.nChannels
+            )
         )
         derivedData.removeAll { $0.name == item.name && $0.sourceGroupID == item.sourceGroupID }
         derivedData.append(item)
@@ -365,9 +382,16 @@ final class AnalysisStore {
         bundle: DualBundle,
         scope: DerivedReconstructionScope,
         threshold: Double,
+        output: DerivedReconstructionOutput,
         channelCount: Int
     ) -> String {
-        let base = "Dual PCA \(factor.name) from \(bundle.groupLabel); reconstructed as score × spatial loading × temporal loading"
+        let base = "Dual PCA \(factor.name) from \(bundle.groupLabel); reconstructed in µV as score × var_sd-scaled spatial loading × var_sd-scaled temporal loading"
+        if output == .clusterAverages {
+            let inclusion = scope == .fullFactor
+                ? "all channels"
+                : "channels with |spatial loading| ≥ \(String(format: "%.3g", threshold))"
+            return "\(base), averaged into \(channelCount) positive/negative spatial-loading cluster channel(s) from \(inclusion)."
+        }
         switch scope {
         case .fullFactor:
             return "\(base) across all \(channelCount) channels."

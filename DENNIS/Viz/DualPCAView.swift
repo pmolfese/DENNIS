@@ -23,6 +23,7 @@ struct DualPCAView: View {
     @Environment(AnalysisStore.self) private var store
     @State private var selectedFactorID: String?
     @State private var reconstructionScope: AnalysisStore.DerivedReconstructionScope = .fullFactor
+    @State private var showingSendOptions = false
 
     private var threshold: Double { store.spatialThreshold }
 
@@ -102,19 +103,27 @@ struct DualPCAView: View {
                             .fixedSize()
                             .help("Full factor keeps all channels. Selected electrodes keeps only channels at or above the current spatial-loading threshold.")
                             Button {
-                                if let bundle = store.dual {
-                                    _ = store.addReconstructedFactorDerivedData(
-                                        from: bundle,
-                                        factor: factor,
-                                        scope: reconstructionScope,
-                                        threshold: threshold
-                                    )
-                                }
+                                showingSendOptions = true
                             } label: {
                                 Label("Send to Decoding / Classification", systemImage: "checkerboard.shield")
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(reconstructionScope == .selectedElectrodes && selectedChannelCount(factor) == 0)
+                            .confirmationDialog(
+                                "Send \(factor.name) to Decoding / Classification",
+                                isPresented: $showingSendOptions,
+                                titleVisibility: .visible
+                            ) {
+                                Button("Use Included Channels") {
+                                    sendToDecoding(factor, output: .includedChannels)
+                                }
+                                Button("Average Positive/Negative Clusters") {
+                                    sendToDecoding(factor, output: .clusterAverages)
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("Choose whether classification should receive every included channel or averaged positive and negative spatial-loading clusters.")
+                            }
                         }
                     }
 
@@ -141,6 +150,20 @@ struct DualPCAView: View {
 
     private func selectedChannelCount(_ factor: TwoStepFactor) -> Int {
         spatialLoading(factor).filter { abs($0) >= threshold }.count
+    }
+
+    private func sendToDecoding(
+        _ factor: TwoStepFactor,
+        output: AnalysisStore.DerivedReconstructionOutput
+    ) {
+        guard let bundle = store.dual else { return }
+        _ = store.addReconstructedFactorDerivedData(
+            from: bundle,
+            factor: factor,
+            scope: reconstructionScope,
+            threshold: threshold,
+            output: output
+        )
     }
 }
 

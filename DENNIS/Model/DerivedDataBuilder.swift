@@ -21,7 +21,8 @@ enum DerivedDataBuilder {
         bundle: AnalysisStore.DualBundle,
         factor: TwoStepFactor,
         scope: AnalysisStore.DerivedReconstructionScope = .fullFactor,
-        threshold: Double = 0
+        threshold: Double = 0,
+        output: AnalysisStore.DerivedReconstructionOutput = .includedChannels
     ) -> BuiltDerivedInput? {
         let result = bundle.result
         guard result.second.indices.contains(factor.firstIndex),
@@ -46,6 +47,16 @@ enum DerivedDataBuilder {
             sourceChannels = (0..<nChannels).filter { abs(spatial[$0]) >= threshold }
         }
         guard !sourceChannels.isEmpty else { return nil }
+        let outputClusters: [[Int]]
+        switch output {
+        case .includedChannels:
+            outputClusters = sourceChannels.map { [$0] }
+        case .clusterAverages:
+            let positive = sourceChannels.filter { spatial[$0] > 0 }
+            let negative = sourceChannels.filter { spatial[$0] < 0 }
+            outputClusters = [positive, negative].filter { !$0.isEmpty }
+        }
+        guard !outputClusters.isEmpty else { return nil }
 
         var subjects: [[[[Float]]]] = []
         subjects.reserveCapacity(nSubjects)
@@ -57,12 +68,19 @@ enum DerivedDataBuilder {
                 let score = scoreRow < second.scores.rows ? second.scores[scoreRow, factor.secondIndex] : 0
                 var samples = Array(
                     repeating: Array(repeating: Float(0), count: nTimes),
-                    count: sourceChannels.count
+                    count: outputClusters.count
                 )
-                for (outputChannel, sourceChannel) in sourceChannels.enumerated() {
-                    let channelWeight = spatial[sourceChannel] * score
+                for (outputChannel, cluster) in outputClusters.enumerated() {
+                    let clusterWeight = meanSpatialLoading(spatial, channels: cluster) * score
+                    let channelScale = aggregateMicrovoltScale(
+                        spatial: spatial,
+                        spatialSD: spatialSD,
+                        temporalSD: temporalSD,
+                        channels: cluster,
+                        nTimes: nTimes
+                    )
                     for time in 0..<nTimes {
-                        samples[outputChannel][time] = Float(channelWeight * temporal[time])
+                        samples[outputChannel][time] = Float(clusterWeight * temporal[time] * channelScale[time])
                     }
                 }
                 cells.append(samples)
@@ -71,20 +89,13 @@ enum DerivedDataBuilder {
         }
 
         let input = EPTensor.Input(
-            nChannels: sourceChannels.count,
+            nChannels: outputClusters.count,
             nTimes: nTimes,
             conditionCount: nCells,
             subjects: subjects,
             samplingRate: bundle.samplingRate,
             baselineSamples: bundle.baselineSamples
         )
-        let scale = sourceChannels.map { sourceChannel in
-            (0..<nTimes).map { time in
-                let s = sourceChannel < spatialSD.count ? spatialSD[sourceChannel] : 1
-                let t = time < temporalSD.count ? temporalSD[time] : 1
-                return s * t
-            }
-        }
         let preview = AnalysisStore.DerivedDataItem.FactorPreview(
             factorName: factor.name,
             temporalLoading: temporal,
@@ -96,9 +107,39 @@ enum DerivedDataBuilder {
         )
         return BuiltDerivedInput(
             input: input,
-            channelIndices: scope == .fullFactor ? nil : sourceChannels,
-            microvoltScale: scale,
+            channelIndices: output == .includedChannels && scope == .selectedElectrodes ? sourceChannels : nil,
+            microvoltScale: nil,
             factorPreview: preview
         )
+    }
+
+    private static func meanSpatialLoading(_ spatial: [Double], channels: [Int]) -> Double {
+        guard !channels.isEmpty else { return 0 }
+        let sum = channels.reduce(0.0) { partial, channel in
+            partial + (channel < spatial.count ? spatial[channel] : 0)
+        }
+        return sum / Double(channels.count)
+    }
+
+    private static func aggregateMicrovoltScale(
+        spatial: [Double],
+        spatialSD: [Double],
+        temporalSD: [Double],
+        channels: [Int],
+        nTimes: Int
+    ) -> [Double] {
+        let meanSpatial = meanSpatialLoading(spatial, channels: channels)
+        guard abs(meanSpatial) > .ulpOfOne else {
+            return Array(repeating: 1, count: nTimes)
+        }
+        let weightedSpatialSD = channels.reduce(0.0) { partial, channel in
+            let loading = channel < spatial.count ? spatial[channel] : 0
+            let scale = channel < spatialSD.count ? spatialSD[channel] : 1
+            return partial + loading * scale
+        } / Double(channels.count)
+        return (0..<nTimes).map { time in
+            let t = time < temporalSD.count ? temporalSD[time] : 1
+            return weightedSpatialSD / meanSpatial * t
+        }
     }
 }

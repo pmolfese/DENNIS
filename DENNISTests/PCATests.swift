@@ -226,6 +226,59 @@ struct PCATests {
     }
 
     @MainActor
+    @Test func reconstructedDualFactorCanAverageSpatialLoadingClusters() throws {
+        let result = try TwoStepPCA.run(
+            tensor: TwoStepTests.tensor,
+            firstMode: .temporal,
+            secondMode: .spatial,
+            firstFactors: 3,
+            secondFactors: 2,
+            firstRotation: .unrotated,
+            secondRotation: .unrotated
+        )
+        let bundle = AnalysisStore.DualBundle(
+            result: result,
+            groupID: "all",
+            groupLabel: "All Subjects",
+            conditionNames: ["Target", "Standard"],
+            subjectNames: ["S1", "S2", "S3", "S4"],
+            subjectLevels: [[], [], [], []],
+            factorNames: [],
+            conditionMetadata: .empty,
+            sensorLayout: nil,
+            nChannels: 5,
+            samplingRate: 250,
+            baselineSamples: 25
+        )
+        let factor = try #require(result.factors.first)
+        let spatial = result.second[factor.firstIndex].pattern.column(factor.secondIndex)
+        let spatialSD = result.second[factor.firstIndex].variableSD
+        let temporal = result.first.pattern.column(factor.firstIndex)
+        let temporalSD = result.first.variableSD
+        let score = result.second[factor.firstIndex].scores[0, factor.secondIndex]
+        let clusters = [
+            (0..<bundle.nChannels).filter { spatial[$0] > 0 },
+            (0..<bundle.nChannels).filter { spatial[$0] < 0 }
+        ].filter { !$0.isEmpty }
+        let built = try #require(DerivedDataBuilder.reconstructedDualFactor(
+            bundle: bundle,
+            factor: factor,
+            output: .clusterAverages
+        ))
+
+        #expect(built.input.nChannels == clusters.count)
+        #expect(built.channelIndices == nil)
+        for (clusterIndex, channels) in clusters.enumerated() {
+            let spatialMicrovolts = channels.reduce(0.0) {
+                $0 + spatial[$1] * spatialSD[$1]
+            } / Double(channels.count)
+            let expected = Float(score * spatialMicrovolts * temporal[0] * temporalSD[0])
+            let actual = built.input.subjects[0][0][clusterIndex][0]
+            #expect(abs(actual - expected) < 1e-5)
+        }
+    }
+
+    @MainActor
     @Test func derivedDataExporterWritesLongFormCSVAndTSV() {
         let item = AnalysisStore.DerivedDataItem(
             id: UUID(),
