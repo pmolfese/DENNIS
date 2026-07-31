@@ -573,11 +573,11 @@ struct DecodingView: View {
     @ViewBuilder
     private func decodingButterflySection(_ windows: [DecodingWindowResult]) -> some View {
         if let input = sourceInput {
-            let samples = butterflySamples(from: input)
-            if !samples.isEmpty {
+            let groups = butterflyGroups(from: input)
+            if !groups.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(derivedItem == nil ? "Decoding Overlay Butterfly" : "Decoding Overlay Component Butterfly")
+                        Text("\(derivedItem == nil ? "ERP" : "Derived Data") Butterfly by \(selectedTarget.title)")
                             .font(.headline)
                         Spacer()
                         HStack(spacing: 12) {
@@ -589,11 +589,11 @@ struct DecodingView: View {
                         .font(.caption)
                     }
                     DecodingButterflyOverlayView(
-                        samples: samples,
+                        groups: groups,
                         samplingRate: input.samplingRate,
                         baselineSamples: input.baselineSamples,
                         windows: windows,
-                        amplitudeUnit: derivedItem == nil ? "µV" : "component units"
+                        amplitudeUnit: derivedItem?.nativeUnit.symbol ?? "µV"
                     )
                     .frame(minHeight: 230)
                 }
@@ -604,8 +604,8 @@ struct DecodingView: View {
     @ViewBuilder
     private func regressionButterflySection(_ windows: [DecodingRegressionWindowResult]) -> some View {
         if let input = sourceInput {
-            let samples = butterflySamples(from: input)
-            if !samples.isEmpty {
+            let groups = butterflyGroups(from: input)
+            if !groups.isEmpty {
                 let overlayWindows = windows.map { window in
                     DecodingWindowResult(
                         centerMS: window.centerMS,
@@ -624,7 +624,7 @@ struct DecodingView: View {
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(derivedItem == nil ? "Prediction Overlay Butterfly" : "Prediction Overlay Component Butterfly")
+                        Text(derivedItem == nil ? "ERP Prediction Butterfly" : "Derived Data Prediction Butterfly")
                             .font(.headline)
                         Spacer()
                         HStack(spacing: 12) {
@@ -636,11 +636,11 @@ struct DecodingView: View {
                         .font(.caption)
                     }
                     DecodingButterflyOverlayView(
-                        samples: samples,
+                        groups: groups,
                         samplingRate: input.samplingRate,
                         baselineSamples: input.baselineSamples,
                         windows: overlayWindows,
-                        amplitudeUnit: derivedItem == nil ? "µV" : "component units"
+                        amplitudeUnit: derivedItem?.nativeUnit.symbol ?? "µV"
                     )
                     .frame(minHeight: 230)
                 }
@@ -1234,29 +1234,120 @@ struct DecodingView: View {
         )
     }
 
-    private func butterflySamples(from input: EPTensor.Input) -> [[Float]] {
+    private func butterflyGroups(from input: EPTensor.Input) -> [DecodingButterflyGroup] {
         guard input.nChannels > 0, input.nTimes > 0 else { return [] }
         let selectedIndices = conditionNames.indices.filter { selectedConditions.contains(conditionNames[$0]) }
         guard !selectedIndices.isEmpty else { return [] }
-        var sums = Array(repeating: Array(repeating: 0.0, count: input.nTimes), count: input.nChannels)
-        var count = 0
 
-        for subject in input.subjects {
+        let behavioralLabels: [String: String]
+        if selectedTarget.kind == .behavioral, let target = selectedTarget.behavioralTarget {
+            behavioralLabels = store.behavioralLabels(
+                tableID: target.tableID,
+                columnName: target.columnName,
+                subjectNames: subjectInfos.map(\.name)
+            )
+        } else {
+            behavioralLabels = [:]
+        }
+
+        var order: [String] = []
+        var subjectAccumulators: [String: [Int: ButterflySubjectAccumulator]] = [:]
+        for (subjectIndex, subject) in input.subjects.enumerated() {
             for conditionIndex in selectedIndices where conditionIndex < subject.count {
-                let samples = subject[conditionIndex]
-                guard samples.count == input.nChannels else { continue }
-                for channelIndex in 0..<input.nChannels where samples[channelIndex].count == input.nTimes {
+                guard let label = butterflyLabel(
+                    subjectIndex: subjectIndex,
+                    conditionIndex: conditionIndex,
+                    behavioralLabels: behavioralLabels
+                ) else { continue }
+                if subjectAccumulators[label] == nil {
+                    order.append(label)
+                    subjectAccumulators[label] = [:]
+                }
+                var accumulator = subjectAccumulators[label]?[subjectIndex] ?? ButterflySubjectAccumulator(
+                    channelSums: Array(
+                        repeating: Array(repeating: 0, count: input.nTimes),
+                        count: input.nChannels
+                    ),
+                    cellCount: 0
+                )
+                let valid = subject[conditionIndex].filter { $0.count == input.nTimes }
+                guard valid.count == input.nChannels else { continue }
+                for channelIndex in 0..<input.nChannels {
                     for timeIndex in 0..<input.nTimes {
-                        sums[channelIndex][timeIndex] += Double(samples[channelIndex][timeIndex])
+                        accumulator.channelSums[channelIndex][timeIndex] += Double(valid[channelIndex][timeIndex])
                     }
                 }
-                count += 1
+                accumulator.cellCount += 1
+                subjectAccumulators[label]?[subjectIndex] = accumulator
             }
         }
 
-        guard count > 0 else { return [] }
-        let scale = 1.0 / Double(count)
-        return sums.map { channel in channel.map { Float($0 * scale) } }
+        return order.enumerated().compactMap { colorIndex, label in
+            guard let accumulators = subjectAccumulators[label], !accumulators.isEmpty else { return nil }
+            let samples = accumulators.keys.sorted().flatMap { subjectIndex -> [DecodingButterflySample] in
+                guard let accumulator = accumulators[subjectIndex], accumulator.cellCount > 0 else { return [] }
+                let scale = 1 / Double(accumulator.cellCount)
+                let subjectName = subjectInfos.indices.contains(subjectIndex)
+                    ? subjectInfos[subjectIndex].name
+                    : "Subject \(subjectIndex + 1)"
+                return accumulator.channelSums.enumerated().map { channelIndex, channel in
+                    DecodingButterflySample(
+                        id: "\(label)|\(subjectIndex)|\(channelIndex)",
+                        subjectName: subjectName,
+                        channelIndex: channelIndex,
+                        values: channel.map { Float($0 * scale) }
+                    )
+                }
+            }
+            guard !samples.isEmpty else { return nil }
+            var mean = Array(repeating: 0.0, count: input.nTimes)
+            for sample in samples {
+                for timeIndex in 0..<input.nTimes {
+                    mean[timeIndex] += Double(sample.values[timeIndex])
+                }
+            }
+            let scale = 1 / Double(samples.count)
+            return DecodingButterflyGroup(
+                id: label,
+                label: label,
+                color: OverlayWaveformView.palette[colorIndex % OverlayWaveformView.palette.count],
+                samples: samples,
+                mean: mean.map { Float($0 * scale) },
+                contributingSubjects: accumulators.count
+            )
+        }
+    }
+
+    private func butterflyLabel(
+        subjectIndex: Int,
+        conditionIndex: Int,
+        behavioralLabels: [String: String]
+    ) -> String? {
+        switch selectedTarget.kind {
+        case .conditionName:
+            guard conditionNames.indices.contains(conditionIndex) else { return nil }
+            return conditionNames[conditionIndex]
+        case .conditionFactor:
+            guard let factorIndex = selectedTarget.factorIndex,
+                  conditionMetadata.levelsByCondition.indices.contains(conditionIndex),
+                  conditionMetadata.levelsByCondition[conditionIndex].indices.contains(factorIndex) else { return nil }
+            return normalizedButterflyLabel(conditionMetadata.levelsByCondition[conditionIndex][factorIndex])
+        case .betweenFactor:
+            guard let factorIndex = selectedTarget.factorIndex,
+                  subjectInfos.indices.contains(subjectIndex),
+                  subjectInfos[subjectIndex].levels.indices.contains(factorIndex) else { return nil }
+            return normalizedButterflyLabel(subjectInfos[subjectIndex].levels[factorIndex])
+        case .behavioral:
+            guard subjectInfos.indices.contains(subjectIndex) else { return nil }
+            return behavioralLabels[subjectInfos[subjectIndex].name].flatMap(normalizedButterflyLabel)
+        case .behavioralContinuous:
+            return "All derived data"
+        }
+    }
+
+    private func normalizedButterflyLabel(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func fullTimesMS(_ input: EPTensor.Input) -> [Double] {
@@ -1529,48 +1620,100 @@ private struct DerivedFactorPreviewView: View {
     }
 }
 
+private struct ButterflySubjectAccumulator {
+    var channelSums: [[Double]]
+    var cellCount: Int
+}
+
+private struct DecodingButterflySample: Identifiable {
+    let id: String
+    let subjectName: String
+    let channelIndex: Int
+    let values: [Float]
+}
+
+private struct DecodingButterflyGroup: Identifiable {
+    let id: String
+    let label: String
+    let color: Color
+    let samples: [DecodingButterflySample]
+    let mean: [Float]
+    let contributingSubjects: Int
+}
+
 private struct DecodingButterflyOverlayView: View {
-    let samples: [[Float]]
+    let groups: [DecodingButterflyGroup]
     let samplingRate: Double
     let baselineSamples: Int
     let windows: [DecodingWindowResult]
     let amplitudeUnit: String
 
-    private var sampleCount: Int { samples.first?.count ?? 0 }
+    @State private var hover: ButterflyHover?
+
+    private var sampleCount: Int { groups.first?.mean.count ?? 0 }
     private var amplitudeBound: Double {
-        let maxAbs = samples.flatMap { $0 }.map { Double(abs($0)) }.max() ?? 0
+        let maxAbs = groups.flatMap(\.samples).flatMap(\.values).map { Double(abs($0)) }.max() ?? 0
         return maxAbs > 0 ? maxAbs : 1
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            Canvas(rendersAsynchronously: true) { context, size in
-                draw(in: &context, size: size)
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    ForEach(groups) { group in
+                        HStack(spacing: 5) {
+                            Capsule().fill(group.color).frame(width: 14, height: 3)
+                            Text(group.label)
+                            Text("n=\(group.contributingSubjects)")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
+                    }
+                }
             }
-            .overlay(alignment: .topTrailing) {
-                Text("\(formattedAmplitudeBound) \(amplitudeUnit)")
+            GeometryReader { proxy in
+                Canvas(rendersAsynchronously: true) { context, size in
+                    draw(in: &context, size: size)
+                }
+                .overlay(alignment: .topTrailing) {
+                    Text("\(formattedAmplitudeBound) \(amplitudeUnit)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.thinMaterial, in: Capsule())
+                        .padding(8)
+                }
+                .overlay(alignment: .bottomLeading) {
+                    HStack {
+                        Text(timeLabel(forSample: 0))
+                        Spacer()
+                        Text(timeLabel(forSample: max(0, sampleCount - 1)))
+                    }
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.thinMaterial, in: Capsule())
-                    .padding(8)
-            }
-            .overlay(alignment: .bottomLeading) {
-                HStack {
-                    Text(timeLabel(forSample: 0))
-                    Spacer()
-                    Text(timeLabel(forSample: max(0, sampleCount - 1)))
+                    .padding(.bottom, 4)
+                    .frame(width: proxy.size.width)
                 }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.bottom, 4)
-                .frame(width: proxy.size.width)
+                .overlay {
+                    if let hover {
+                        hoverLabel(hover, in: proxy.size)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2)))
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        updateHover(at: location, size: proxy.size)
+                    case .ended:
+                        hover = nil
+                    }
+                }
             }
         }
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2)))
     }
 
     private var formattedAmplitudeBound: String {
@@ -1603,13 +1746,90 @@ private struct DecodingButterflyOverlayView: View {
                            style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
 
-        for channel in samples where channel.count == sampleCount {
-            context.stroke(
-                path(for: channel, midY: midY, xScale: xScale, yScale: yScale, xOffset: plotRect.minX),
-                with: .color(.primary.opacity(0.28)),
-                lineWidth: 0.65
-            )
+        for group in groups {
+            for sample in group.samples where sample.values.count == sampleCount {
+                context.stroke(
+                    path(for: sample.values, midY: midY, xScale: xScale, yScale: yScale, xOffset: plotRect.minX),
+                    with: .color(group.color.opacity(hover?.sampleID == sample.id ? 0.95 : 0.16)),
+                    lineWidth: hover?.sampleID == sample.id ? 2.2 : 0.65
+                )
+            }
+            if group.mean.count == sampleCount {
+                context.stroke(
+                    path(for: group.mean, midY: midY, xScale: xScale, yScale: yScale, xOffset: plotRect.minX),
+                    with: .color(group.color.opacity(0.95)),
+                    lineWidth: 2
+                )
+            }
         }
+    }
+
+    private func updateHover(at location: CGPoint, size: CGSize) {
+        guard sampleCount > 1, size.width > 0, size.height > 0 else {
+            hover = nil
+            return
+        }
+        let plotRect = CGRect(x: 0, y: 8, width: size.width, height: max(1, size.height - 26))
+        guard plotRect.contains(location) else {
+            hover = nil
+            return
+        }
+        let fraction = min(1, max(0, (location.x - plotRect.minX) / plotRect.width))
+        let sampleIndex = min(sampleCount - 1, max(0, Int((fraction * CGFloat(sampleCount - 1)).rounded())))
+        let yScale = Double(plotRect.height / 2 - 6) / amplitudeBound
+        guard yScale > 0 else {
+            hover = nil
+            return
+        }
+        let mouseValue = Double(plotRect.midY - location.y) / yScale
+
+        var nearest: (group: DecodingButterflyGroup, sample: DecodingButterflySample, distance: Double)?
+        for group in groups {
+            for sample in group.samples where sample.values.indices.contains(sampleIndex) {
+                let distance = abs(Double(sample.values[sampleIndex]) - mouseValue)
+                if nearest == nil || distance < nearest!.distance {
+                    nearest = (group, sample, distance)
+                }
+            }
+        }
+        guard let nearest else {
+            hover = nil
+            return
+        }
+        hover = ButterflyHover(
+            sampleID: nearest.sample.id,
+            subjectName: nearest.sample.subjectName,
+            groupLabel: nearest.group.label,
+            channelIndex: nearest.sample.channelIndex,
+            sampleIndex: sampleIndex,
+            value: Double(nearest.sample.values[sampleIndex]),
+            location: location
+        )
+    }
+
+    private func hoverLabel(_ hover: ButterflyHover, in size: CGSize) -> some View {
+        let x = min(max(115, hover.location.x), max(115, size.width - 115))
+        let y = hover.location.y > 62 ? hover.location.y - 38 : hover.location.y + 38
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(hover.subjectName)
+                .font(.caption.weight(.semibold))
+            Text("\(hover.groupLabel) · channel \(hover.channelIndex + 1)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("\(timeLabel(forSample: hover.sampleIndex)) · \(formatHoverValue(hover.value)) \(amplitudeUnit)")
+                .font(.caption2.monospacedDigit())
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 220, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .shadow(radius: 3, y: 1)
+        .position(x: x, y: y)
+        .allowsHitTesting(false)
+    }
+
+    private func formatHoverValue(_ value: Double) -> String {
+        abs(value) >= 1 ? String(format: "%.2f", value) : String(format: "%.3g", value)
     }
 
     private func drawDecodingBands(in context: inout GraphicsContext, rect: CGRect) {
@@ -1628,7 +1848,7 @@ private struct DecodingButterflyOverlayView: View {
             let succeeds = window.balancedAccuracy > window.result.chance
             context.fill(
                 Path(band),
-                with: .color((succeeds ? Color.green : Color.red).opacity(0.32))
+                with: .color((succeeds ? Color.green : Color.red).opacity(succeeds ? 0.10 : 0.07))
             )
         }
     }
@@ -1668,6 +1888,16 @@ private struct DecodingButterflyOverlayView: View {
         guard samplingRate > 0 else { return "\(sample)" }
         let ms = Double(sample - baselineSamples) / samplingRate * 1000
         return String(format: "%.0f ms", ms)
+    }
+
+    private struct ButterflyHover {
+        let sampleID: String
+        let subjectName: String
+        let groupLabel: String
+        let channelIndex: Int
+        let sampleIndex: Int
+        let value: Double
+        let location: CGPoint
     }
 }
 

@@ -17,6 +17,15 @@ nonisolated struct CPObservedContext: Sendable {
     let samplingRate: Double
 }
 
+nonisolated struct CPTensorDecodingRequest: Sendable {
+    let selectedComponent: Int
+    let componentScope: AnalysisStore.TensorComponentScope
+    let output: AnalysisStore.DerivedReconstructionOutput
+    let positiveChannels: [Int]
+    let negativeChannels: [Int]
+    let loadingThreshold: Double
+}
+
 struct CPExplorerView: View {
     let result: CPResult
     let modeTypes: [TFModeType]
@@ -30,6 +39,7 @@ struct CPExplorerView: View {
     let conditionMetadata: ConditionModeMetadata
     var coreConsistency: Double? = nil
     var observedContext: CPObservedContext? = nil
+    var onSendToDecoding: ((CPTensorDecodingRequest) -> Void)? = nil
 
     @State private var groupBy = "Subject"
     @State private var selectedComponent = 0
@@ -54,6 +64,9 @@ struct CPExplorerView: View {
     @State private var observedRebuilding = false
     @State private var observedRebuildGeneration = 0
     @State private var observedRebuildTask: Task<Void, Never>?
+    @State private var showingSendOptions = false
+    @State private var sendComponentScope: AnalysisStore.TensorComponentScope = .selected
+    @State private var sendOutput: AnalysisStore.DerivedReconstructionOutput = .clusterAverages
 
     private static let conditionDimension = "Condition"
 
@@ -445,6 +458,17 @@ struct CPExplorerView: View {
                     subjectScaleControls
                 }
                 Spacer()
+                if onSendToDecoding != nil {
+                    Button {
+                        showingSendOptions = true
+                    } label: {
+                        Label("Send to Decoding", systemImage: "checkerboard.shield")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .popover(isPresented: $showingSendOptions, arrowEdge: .top) {
+                        sendOptionsPopover
+                    }
+                }
             }
 
             HStack(alignment: .top, spacing: 18) {
@@ -459,6 +483,50 @@ struct CPExplorerView: View {
         }
         .padding(12)
         .background(.quaternary.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var sendOptionsPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Create Derived Dataset")
+                .font(.headline)
+            Text("Component \(selectedR + 1)")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+
+            Picker("Components", selection: $sendComponentScope) {
+                Text("Selected").tag(AnalysisStore.TensorComponentScope.selected)
+                Text("All retained").tag(AnalysisStore.TensorComponentScope.retained)
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Electrodes", selection: $sendOutput) {
+                Text("Separate").tag(AnalysisStore.DerivedReconstructionOutput.includedChannels)
+                Text("+ / - averages").tag(AnalysisStore.DerivedReconstructionOutput.clusterAverages)
+            }
+            .pickerStyle(.segmented)
+
+            Button {
+                let request = CPTensorDecodingRequest(
+                    selectedComponent: selectedR,
+                    componentScope: sendComponentScope,
+                    output: sendOutput,
+                    positiveChannels: positiveFootprintChannels(component: selectedR),
+                    negativeChannels: negativeFootprintChannels(component: selectedR),
+                    loadingThreshold: channelThresholdValue(component: selectedR)
+                )
+                showingSendOptions = false
+                onSendToDecoding?(request)
+            } label: {
+                Label("Create and Open in Decoding", systemImage: "arrow.right.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(sendOutput == .clusterAverages
+                      && positiveFootprintChannels(component: selectedR).isEmpty
+                      && negativeFootprintChannels(component: selectedR).isEmpty)
+        }
+        .padding(14)
+        .frame(width: 340, alignment: .leading)
     }
 
     private func conditionScaleControls(mode: Int) -> some View {

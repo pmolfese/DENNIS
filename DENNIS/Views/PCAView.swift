@@ -79,6 +79,15 @@ struct PCAView: View {
         groupID.isEmpty ? study.name : (groupID.split(separator: "/").last.map(String.init) ?? groupID)
     }
     private var loadedCount: Int { members.filter { $0.loadState == .loaded }.count }
+    private var currentDualBundle: AnalysisStore.DualBundle? {
+        if let bundle = analysis.pcaCache(for: groupID)?.dualBundle {
+            return bundle
+        }
+        if let bundle = analysis.dual, bundle.groupID == groupID {
+            return bundle
+        }
+        return nil
+    }
 
     var body: some View {
         ScrollView {
@@ -264,6 +273,9 @@ struct PCAView: View {
             if model.pcaModel == nil { model.pcaModel = cache.pcaModel }
             if model.dualModel == nil { model.dualModel = cache.dualModel }
             if model.spatialScree == nil { model.spatialScree = cache.spatialScree }
+            if let bundle = cache.dualBundle {
+                analysis.dual = bundle
+            }
         }
         // Older paths and cross-tab consumers already store the latest dual PCA
         // bundle directly, so keep using it as a fallback for the TFSF maps.
@@ -684,7 +696,8 @@ struct PCAView: View {
                 Text(error).font(.caption).foregroundStyle(.red)
             } else if let dualModel = model.dualModel {
                 Divider()
-                DualPCAView(result: dualModel, sensorLayout: groupSensorLayout,
+                DualPCAView(result: dualModel, bundle: currentDualBundle,
+                            sensorLayout: groupSensorLayout,
                             clusterSubjects: model.clusterSubjects,
                             clusterConditionNames: conditionNames,
                             clusterFactorNames: study.factors.map(\.name),

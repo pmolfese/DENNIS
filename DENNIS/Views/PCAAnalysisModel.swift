@@ -328,7 +328,7 @@ final class PCAAnalysisModel {
                 switch outcome {
                 case .success(let model):
                     self.dualModel = model
-                    store.dual = AnalysisStore.DualBundle(
+                    let bundle = AnalysisStore.DualBundle(
                         result: model, groupID: groupID, groupLabel: groupLabel,
                         conditionNames: conditionNames, subjectNames: subjectNames,
                         subjectLevels: snapshot.subjects.map(\.levels),
@@ -338,7 +338,11 @@ final class PCAAnalysisModel {
                         samplingRate: clusterData.samplingRate,
                         baselineSamples: clusterData.baseline
                     )
-                    store.updatePCACache(for: groupID) { $0.dualModel = model }
+                    store.dual = bundle
+                    store.updatePCACache(for: groupID) {
+                        $0.dualModel = model
+                        $0.dualBundle = bundle
+                    }
                     self.clusterSubjects = clusterData.subjects
                     self.clusterBaseline = clusterData.baseline
                     self.clusterSamplingRate = clusterData.samplingRate

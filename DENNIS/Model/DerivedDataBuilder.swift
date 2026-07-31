@@ -113,6 +113,82 @@ enum DerivedDataBuilder {
         )
     }
 
+    static func reconstructedTensorComponents(
+        result: CPResult,
+        modeTypes: [TFModeType],
+        components: [Int],
+        channelClusters: [[Int]],
+        samplingRate: Double,
+        baselineSamples: Int
+    ) -> BuiltDerivedInput? {
+        guard result.factors.count == modeTypes.count,
+              let channelMode = modeTypes.firstIndex(of: .channel),
+              let timeMode = modeTypes.firstIndex(of: .time),
+              let subjectMode = modeTypes.firstIndex(of: .subject) else { return nil }
+        let conditionMode = modeTypes.firstIndex(of: .condition)
+        let validComponents = components.filter { $0 >= 0 && $0 < result.rank }
+        guard !validComponents.isEmpty else { return nil }
+
+        let nChannels = result.factors[channelMode].rows
+        let nTimes = result.factors[timeMode].rows
+        let nSubjects = result.factors[subjectMode].rows
+        let nConditions = conditionMode.map { result.factors[$0].rows } ?? 1
+        let clusters = channelClusters.compactMap { cluster -> [Int]? in
+            let valid = cluster.filter { $0 >= 0 && $0 < nChannels }
+            return valid.isEmpty ? nil : valid
+        }
+        guard nChannels > 0, nTimes > 0, nSubjects > 0, nConditions > 0,
+              !clusters.isEmpty else { return nil }
+
+        var subjects = Array(
+            repeating: Array(
+                repeating: Array(
+                    repeating: Array(repeating: Float(0), count: nTimes),
+                    count: clusters.count
+                ),
+                count: nConditions
+            ),
+            count: nSubjects
+        )
+
+        for subject in 0..<nSubjects {
+            for condition in 0..<nConditions {
+                for (outputChannel, cluster) in clusters.enumerated() {
+                    for time in 0..<nTimes {
+                        var value = 0.0
+                        for component in validComponents {
+                            var modeProduct = result.weights[component]
+                                * result.factors[timeMode][time, component]
+                                * result.factors[subjectMode][subject, component]
+                            if let conditionMode {
+                                modeProduct *= result.factors[conditionMode][condition, component]
+                            }
+                            let meanChannelLoading = cluster.reduce(0.0) { partial, channel in
+                                partial + result.factors[channelMode][channel, component]
+                            } / Double(cluster.count)
+                            value += modeProduct * meanChannelLoading
+                        }
+                        subjects[subject][condition][outputChannel][time] = Float(value)
+                    }
+                }
+            }
+        }
+
+        return BuiltDerivedInput(
+            input: EPTensor.Input(
+                nChannels: clusters.count,
+                nTimes: nTimes,
+                conditionCount: nConditions,
+                subjects: subjects,
+                samplingRate: samplingRate,
+                baselineSamples: baselineSamples
+            ),
+            channelIndices: clusters.allSatisfy { $0.count == 1 } ? clusters.map { $0[0] } : nil,
+            microvoltScale: nil,
+            factorPreview: nil
+        )
+    }
+
     private static func meanSpatialLoading(_ spatial: [Double], channels: [Int]) -> Double {
         guard !channels.isEmpty else { return 0 }
         let sum = channels.reduce(0.0) { partial, channel in

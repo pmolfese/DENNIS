@@ -109,6 +109,7 @@ final class AnalysisStore {
         var screeAnalysis: ScreeAnalysis?
         var pcaModel: TemporalPCAResult?
         var dualModel: TwoStepPCAResult?
+        var dualBundle: DualBundle?
         var spatialScree: ScreeAnalysis?
     }
 
@@ -126,6 +127,7 @@ final class AnalysisStore {
 
     enum DerivedKind: String, Sendable {
         case reconstructedDualFactor = "PCA reconstructed temporal-spatial factor"
+        case reconstructedTensorComponent = "Tensor reconstructed component"
     }
 
     enum DerivedReconstructionScope: String, CaseIterable, Identifiable, Sendable {
@@ -138,6 +140,13 @@ final class AnalysisStore {
     enum DerivedReconstructionOutput: String, CaseIterable, Identifiable, Sendable {
         case includedChannels = "Included channels"
         case clusterAverages = "Cluster averages"
+
+        var id: String { rawValue }
+    }
+
+    enum TensorComponentScope: String, CaseIterable, Identifiable, Sendable {
+        case selected = "Selected component"
+        case retained = "All retained components"
 
         var id: String { rawValue }
     }
@@ -375,6 +384,66 @@ final class AnalysisStore {
     @discardableResult
     func addReconstructedFactorDerivedData(from bundle: DualBundle, factor: TwoStepFactor) -> DerivedDataItem? {
         addReconstructedFactorDerivedData(from: bundle, factor: factor, scope: .fullFactor, threshold: spatialThreshold)
+    }
+
+    @discardableResult
+    func addReconstructedTensorDerivedData(
+        result: CPResult,
+        modeTypes: [TFModeType],
+        components: [Int],
+        channelClusters: [[Int]],
+        componentScope: TensorComponentScope,
+        output: DerivedReconstructionOutput,
+        sourceGroupID: String,
+        sourceGroupLabel: String,
+        conditionNames: [String],
+        subjectNames: [String],
+        subjectLevels: [[String]],
+        factorNames: [String],
+        conditionMetadata: ConditionModeMetadata,
+        samplingRate: Double,
+        baselineSamples: Int,
+        nativeUnit: DerivedDataItem.Unit,
+        preprocessingDescription: String
+    ) -> DerivedDataItem? {
+        guard let built = DerivedDataBuilder.reconstructedTensorComponents(
+            result: result,
+            modeTypes: modeTypes,
+            components: components,
+            channelClusters: channelClusters,
+            samplingRate: samplingRate,
+            baselineSamples: baselineSamples
+        ) else { return nil }
+
+        let componentLabel = componentScope == .selected
+            ? "C\((components.first ?? 0) + 1)"
+            : "C1-C\(result.rank)"
+        let outputLabel = output == .includedChannels ? "electrodes" : "positive-negative clusters"
+        let unitDescription = nativeUnit == .microvolts ? "µV" : nativeUnit.symbol
+        let item = DerivedDataItem(
+            id: UUID(),
+            name: "Tensor \(componentLabel) reconstructed (\(outputLabel))",
+            kind: .reconstructedTensorComponent,
+            sourceGroupID: sourceGroupID,
+            sourceGroupLabel: sourceGroupLabel,
+            selectedFactorName: componentLabel,
+            conditionNames: conditionNames,
+            subjectNames: Array(subjectNames.prefix(built.input.subjects.count)),
+            subjectLevels: Array(subjectLevels.prefix(built.input.subjects.count)),
+            factorNames: factorNames,
+            conditionMetadata: conditionMetadata,
+            input: built.input,
+            channelIndices: built.channelIndices,
+            nativeUnit: nativeUnit,
+            microvoltScale: nil,
+            factorPreview: nil,
+            provenance: "PARAFAC \(componentLabel) from \(sourceGroupLabel), reconstructed in \(unitDescription) as the product of channel, time, condition, and subject factors (\(preprocessingDescription)); output as \(outputLabel)."
+        )
+        derivedData.removeAll { $0.name == item.name && $0.sourceGroupID == item.sourceGroupID }
+        derivedData.append(item)
+        requestedSelection = .derived(item.id)
+        activeMode = .decoding
+        return item
     }
 
     private func provenance(

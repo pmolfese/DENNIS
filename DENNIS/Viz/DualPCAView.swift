@@ -11,6 +11,7 @@ import SwiftUI
 
 struct DualPCAView: View {
     let result: TwoStepPCAResult
+    var bundle: AnalysisStore.DualBundle?
     var sensorLayout: SensorLayout?
     /// Per-subject ERP + design levels for the group, used for cluster ERPs when
     /// a factor topography is clicked.
@@ -94,35 +95,23 @@ struct DualPCAView: View {
                             Label("Selected \(factor.name)", systemImage: "target")
                                 .font(.caption.weight(.semibold))
                             Spacer()
-                            Picker("Reconstruct", selection: $reconstructionScope) {
-                                ForEach(AnalysisStore.DerivedReconstructionScope.allCases) { scope in
-                                    Text(scope.rawValue).tag(scope)
-                                }
+                            Picker("Electrodes", selection: $reconstructionScope) {
+                                Text("All").tag(AnalysisStore.DerivedReconstructionScope.fullFactor)
+                                Text("|loading| ≥ \(threshold.formatted(.number.precision(.fractionLength(2))))")
+                                    .tag(AnalysisStore.DerivedReconstructionScope.selectedElectrodes)
                             }
                             .pickerStyle(.segmented)
                             .fixedSize()
-                            .help("Full factor keeps all channels. Selected electrodes keeps only channels at or above the current spatial-loading threshold.")
+                            .help("All reconstructs every electrode. The threshold option reconstructs only electrodes whose absolute spatial loading meets the threshold above.")
                             Button {
                                 showingSendOptions = true
                             } label: {
                                 Label("Send to Decoding / Classification", systemImage: "checkerboard.shield")
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(reconstructionScope == .selectedElectrodes && selectedChannelCount(factor) == 0)
-                            .confirmationDialog(
-                                "Send \(factor.name) to Decoding / Classification",
-                                isPresented: $showingSendOptions,
-                                titleVisibility: .visible
-                            ) {
-                                Button("Use Included Channels") {
-                                    sendToDecoding(factor, output: .includedChannels)
-                                }
-                                Button("Average Positive/Negative Clusters") {
-                                    sendToDecoding(factor, output: .clusterAverages)
-                                }
-                                Button("Cancel", role: .cancel) {}
-                            } message: {
-                                Text("Choose whether classification should receive every included channel or averaged positive and negative spatial-loading clusters.")
+                            .disabled(bundle == nil || reconstructionScope == .selectedElectrodes && selectedChannelCount(factor) == 0)
+                            .popover(isPresented: $showingSendOptions, arrowEdge: .top) {
+                                sendOptionsPopover(factor)
                             }
                         }
                     }
@@ -152,11 +141,41 @@ struct DualPCAView: View {
         spatialLoading(factor).filter { abs($0) >= threshold }.count
     }
 
+    private func sendOptionsPopover(_ factor: TwoStepFactor) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Channels for Decoding")
+                .font(.headline)
+            Text(factor.name)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+
+            Button {
+                showingSendOptions = false
+                sendToDecoding(factor, output: .includedChannels)
+            } label: {
+                Label("Keep electrodes separate", systemImage: "waveform.path.ecg")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                showingSendOptions = false
+                sendToDecoding(factor, output: .clusterAverages)
+            } label: {
+                Label("Average positive / negative clusters", systemImage: "plusminus")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+    }
+
     private func sendToDecoding(
         _ factor: TwoStepFactor,
         output: AnalysisStore.DerivedReconstructionOutput
     ) {
-        guard let bundle = store.dual else { return }
+        guard let bundle else { return }
         _ = store.addReconstructedFactorDerivedData(
             from: bundle,
             factor: factor,

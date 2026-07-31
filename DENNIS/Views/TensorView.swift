@@ -463,7 +463,8 @@ struct TensorView: View {
                     subjectLevels: subjectLevels(), factorNames: factorNames,
                     conditionMetadata: conditionMetadata,
                     coreConsistency: cpCoreConsistency,
-                    observedContext: cpObservedContext())
+                    observedContext: cpObservedContext(),
+                    onSendToDecoding: tensorSendHandler(result))
             } else {
                 Text("Run the diagnostics first to get a recommended rank, then decompose.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -525,6 +526,92 @@ struct TensorView: View {
     private func subjectLevels() -> [[String]] {
         if let item = derivedItem { return item.subjectLevels }
         return EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.levels) ?? []
+    }
+
+    private func contributingSubjectNames() -> [String] {
+        if let item = derivedItem { return item.subjectNames }
+        return EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.name) ?? []
+    }
+
+    private func tensorSendHandler(_ result: CPResult) -> ((CPTensorDecodingRequest) -> Void)? {
+        guard source == .erp,
+              algorithm == .parafac,
+              cpModeTypes.contains(.channel),
+              cpModeTypes.contains(.time),
+              cpModeTypes.contains(.subject) else { return nil }
+        return { request in
+            sendTensorToDecoding(result: result, request: request)
+        }
+    }
+
+    private func sendTensorToDecoding(result: CPResult, request: CPTensorDecodingRequest) {
+        guard let input = sourceInput,
+              let channelMode = cpModeTypes.firstIndex(of: .channel) else { return }
+        let components = request.componentScope == .selected
+            ? [request.selectedComponent]
+            : Array(0..<result.rank)
+        let clusters: [[Int]]
+        switch request.output {
+        case .includedChannels:
+            clusters = (0..<result.factors[channelMode].rows).map { [$0] }
+        case .clusterAverages:
+            clusters = [request.positiveChannels, request.negativeChannels].filter { !$0.isEmpty }
+        }
+        guard !clusters.isEmpty else { return }
+
+        let hasConditionMode = cpModeTypes.contains(.condition)
+        let outputConditionNames = hasConditionMode ? conditionNames : ["Pooled"]
+        let outputConditionMetadata = hasConditionMode ? conditionMetadata : .empty
+        let timing = tensorDerivedTiming(sourceInput: input)
+        let unit: AnalysisStore.DerivedDataItem.Unit
+        if scaleChannels {
+            unit = .component
+        } else {
+            unit = derivedItem?.nativeUnit ?? .microvolts
+        }
+        var preprocessing: [String] = []
+        if centerSubjects { preprocessing.append("subject-centered") }
+        if centerTime { preprocessing.append("time-centered") }
+        if scaleChannels { preprocessing.append("channel RMS-scaled") }
+        if preprocessing.isEmpty { preprocessing.append("no amplitude preprocessing") }
+        if poolConditions { preprocessing.append("conditions pooled") }
+        let thresholdText = request.output == .clusterAverages
+            ? ", footprint |loading| ≥ \(String(format: "%.3g", request.loadingThreshold))"
+            : ""
+
+        _ = store.addReconstructedTensorDerivedData(
+            result: result,
+            modeTypes: cpModeTypes,
+            components: components,
+            channelClusters: clusters,
+            componentScope: request.componentScope,
+            output: request.output,
+            sourceGroupID: derivedItem?.sourceGroupID ?? groupID ?? "",
+            sourceGroupLabel: title,
+            conditionNames: outputConditionNames,
+            subjectNames: contributingSubjectNames(),
+            subjectLevels: subjectLevels(),
+            factorNames: factorNames,
+            conditionMetadata: outputConditionMetadata,
+            samplingRate: timing.samplingRate,
+            baselineSamples: timing.baselineSamples,
+            nativeUnit: unit,
+            preprocessingDescription: preprocessing.joined(separator: ", ") + thresholdText
+        )
+    }
+
+    private func tensorDerivedTiming(sourceInput: EPTensor.Input) -> (samplingRate: Double, baselineSamples: Int) {
+        guard cpTimesMS.count > 1 else {
+            return (sourceInput.samplingRate, min(sourceInput.baselineSamples, max(cpTimesMS.count - 1, 0)))
+        }
+        let deltas = zip(cpTimesMS.dropFirst(), cpTimesMS).map { abs($0 - $1) }.filter { $0 > 0 }
+        guard !deltas.isEmpty else {
+            return (sourceInput.samplingRate, min(sourceInput.baselineSamples, cpTimesMS.count))
+        }
+        let stepMS = deltas.sorted()[deltas.count / 2]
+        let rate = stepMS > 0 ? 1000 / stepMS : sourceInput.samplingRate
+        let baseline = Int((-cpTimesMS[0] / stepMS).rounded())
+        return (rate, min(max(baseline, 0), cpTimesMS.count))
     }
 
     private var sourceInput: EPTensor.Input? {
