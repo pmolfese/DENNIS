@@ -13,6 +13,12 @@
 //  product of their Gram matrices. The Khatri-Rao fold order matches
 //  `MultiwayTensor.unfold` (ascending rest modes, smallest varying fastest).
 //
+//  References (full citations in `Model/References.swift`):
+//    - Harshman (1970), UCLA Working Papers in Phonetics 16:1-84 — the
+//      PARAFAC/CANDECOMP model.
+//    - Kolda & Bader (2009), SIAM Review 51(3):455-500 — the ALS update this
+//      file implements directly.
+//
 
 import Accelerate
 

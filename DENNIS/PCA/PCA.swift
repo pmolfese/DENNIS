@@ -10,6 +10,13 @@
 //  This is the single-step engine; the temporal→spatial two-step workflow is
 //  layered on top of this.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Dien (2010), J Neurosci Methods 187(1):138-145 — the ERP PCA Toolkit
+//      workflow this ports, including matrix type and Kaiser normalization.
+//    - Dien, Beal & Berg (2005), Clin Neurophysiol 116(8):1808-1825 — the
+//      rationale for that matrix-type and rotation choice on ERP data.
+//    - Kaiser (1958), Psychometrika 23(3):187-200 — the loading normalization.
+//
 
 import Foundation
 

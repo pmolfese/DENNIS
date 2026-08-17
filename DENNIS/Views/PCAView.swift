@@ -128,16 +128,25 @@ struct PCAView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if groupID.isEmpty {
-                // The root group is the study itself — let the title be renamed.
-                TextField("Study name", text: Binding(
-                    get: { study.name },
-                    set: { study.name = $0 }
-                ))
-                .textFieldStyle(.plain)
-                .font(.largeTitle.bold())
-            } else {
-                Text(title).font(.largeTitle.bold())
+            HStack(alignment: .firstTextBaseline) {
+                if groupID.isEmpty {
+                    // The root group is the study itself — let the title be renamed.
+                    TextField("Study name", text: Binding(
+                        get: { study.name },
+                        set: { study.name = $0 }
+                    ))
+                    .textFieldStyle(.plain)
+                    .font(.largeTitle.bold())
+                } else {
+                    Text(title).font(.largeTitle.bold())
+                }
+                Spacer()
+                ReferencesButton(
+                    title: "PCA References",
+                    intro: "The methods this mode implements: the ERP PCA Toolkit workflow, "
+                        + "its rotations, and parallel analysis for choosing how many factors to retain.",
+                    references: References.forPCA
+                )
             }
             Text(groupID.isEmpty ? "All subjects" : groupID.replacingOccurrences(of: "/", with: " › "))
                 .foregroundStyle(.secondary)
@@ -353,7 +362,8 @@ struct PCAView: View {
                 Text("Temporal Scree").font(.headline)
                 HelpButton(text: "Runs an unrotated PCA on the time dimension and compares its "
                            + "eigenvalues against random data of the same shape, to suggest how many "
-                           + "temporal factors to retain.")
+                           + "temporal factors to retain (parallel analysis).\n\n"
+                           + References.shortList(References.forScree))
                 Spacer()
                 if let analysis = model.screeAnalysis {
                     savePNGButton("temporal_scree") { ScreePlotView(analysis: analysis) }
@@ -389,7 +399,8 @@ struct PCAView: View {
             HStack(spacing: 6) {
                 Text("Temporal PCA").font(.headline)
                 HelpButton(text: "Runs a temporal PCA (time points as variables) and plots each "
-                           + "factor's loading as a waveform. Use the scree at left to pick a factor count.")
+                           + "factor's loading as a waveform. Use the scree at left to pick a factor count.\n\n"
+                           + References.shortList(References.forPCAMethod))
                 Spacer()
                 if let model = model.pcaModel {
                     savePNGButton("temporal_loadings") { TemporalPCAView(model: model) }
@@ -405,6 +416,8 @@ struct PCAView: View {
                     Text("Unrotated").tag(PCARotation.unrotated)
                 }
                 .fixedSize()
+                .help("Promax/Varimax: \(References.shortList(References.forRotation)). "
+                      + "Infomax: \(References.shortList(References.forInfomax)).")
                 Toggle("Jackknife LOO", isOn: $runPCAJackknife)
                     .toggleStyle(.checkbox)
                     .help("Reruns the PCA once per subject, each time leaving one subject out, then summarizes loading stability.")
@@ -598,7 +611,8 @@ struct PCAView: View {
                            + "scores (the ERP Toolkit dual decomposition). The first step uses the "
                            + "temporal rotation above; the second step uses the rotation here. Spatial "
                            + "factors are chosen per temporal factor — run the spatial scree to estimate "
-                           + "how many to retain.")
+                           + "how many to retain.\n\n"
+                           + References.shortList(References.forPCAMethod))
                 Spacer()
                 factorCountControl("Spatial factors", value: $dualSpatialFactors, range: 1...20)
                 Picker("2nd rotation", selection: $dualSecondRotation) {
@@ -608,6 +622,8 @@ struct PCAView: View {
                     Text("Varimax").tag(PCARotation.varimax)
                 }
                 .fixedSize()
+                .help("Promax/Varimax: \(References.shortList(References.forRotation)). "
+                      + "Infomax: \(References.shortList(References.forInfomax)).")
                 Toggle("Jackknife LOO", isOn: $runDualJackknife)
                     .toggleStyle(.checkbox)
                     .help("Reruns the dual PCA once per subject dropped for first-step and second-step loading stability.")

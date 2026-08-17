@@ -90,6 +90,17 @@ struct DetailView: View {
                     description: Text("Select a group in the sidebar to run a mean-centered (task) PLS.")
                 )
             }
+        case .permutation:
+            if case .group(let id) = selection {
+                PermutationStatisticsView(groupID: id).id(id)
+            } else {
+                ContentUnavailableView(
+                    "Permutation Statistics",
+                    systemImage: "point.3.connected.trianglepath.dotted",
+                    description: Text("Select a group in the sidebar to run a cluster-based permutation test. "
+                                      + "Between-subject designs compare that group's immediate factor levels.")
+                )
+            }
         case .clustering:
             ContentUnavailableView(
                 "Clustering Mode",

@@ -9,6 +9,12 @@
 //  resampling layer (permutation tests on the singular values, bootstrap ratios
 //  on the saliences), which the decomposition engines don't carry.
 //
+//  References (full citations in `Model/References.swift`):
+//    - McIntosh & Lobaugh (2004), NeuroImage 23:S250-S263 — mean-centered
+//      (task) PLS and permutation testing of its singular values.
+//    - Krishnan et al. (2011), NeuroImage 56(2):455-475 — bootstrap ratios on
+//      the brain saliences.
+//
 //  Mean-centered (task) PLS is implemented. Behavior and non-rotated (contrast)
 //  PLS share the type surface but are reserved for a later pass.
 //

@@ -155,7 +155,16 @@ struct TensorView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("\(title) · tensor").font(.largeTitle.bold())
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(title) · tensor").font(.largeTitle.bold())
+                Spacer()
+                ReferencesButton(
+                    title: "Tensor References",
+                    intro: "The multiway decomposition this mode implements: PARAFAC for a fixed "
+                        + "loading per mode, PARAFAC2 when one mode is allowed to vary in shape by slice.",
+                    references: References.forTensor
+                )
+            }
             if let summary = dimsSummary { Text(summary).font(.callout.monospacedDigit()).foregroundStyle(.secondary) }
         }
     }
@@ -345,7 +354,7 @@ struct TensorView: View {
                 Text("Per-mode scree").font(.headline)
                 HelpButton(text: "The singular spectrum of each mode (the multilinear SVD). Parallel "
                            + "analysis compares each mode against random tensors of the same shape; the "
-                           + "smallest per-mode count above the noise floor is the recommended rank.")
+                           + "smallest per-mode count above the noise floor is the recommended rank.\n\n" + References.shortList(References.forScree))
                 Spacer()
                 Toggle("Parallel analysis", isOn: $parallelAnalysis).toggleStyle(.checkbox).font(.caption)
                 if parallelAnalysis {
@@ -434,7 +443,7 @@ struct TensorView: View {
                 HelpButton(text: "PARAFAC estimates one loading per mode. PARAFAC2 slices by subject "
                            + "and allows the time mode to vary by subject, which can capture ERP latency "
                            + "or waveform-shape differences. In PARAFAC2, non-time modes are folded into "
-                           + "one feature mode and CORCONDIA is not reported.")
+                           + "one feature mode and CORCONDIA is not reported.\n\n" + References.shortList(References.forTensor))
                 Spacer()
                 Picker("Algorithm", selection: $algorithm) {
                     ForEach(TensorAlgorithm.allCases, id: \.self) { Text($0.rawValue).tag($0) }

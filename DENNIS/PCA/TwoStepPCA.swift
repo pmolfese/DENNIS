@@ -11,6 +11,12 @@
 //  the cross product of the two steps; their variance is the product of the
 //  per-step variances.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Dien (2010), J Neurosci Methods 187(1):138-145 — the two-step
+//      decomposition itself.
+//    - Dien, Beal & Berg (2005), Clin Neurophysiol 116(8):1808-1825 — why
+//      temporal-then-spatial is the recommended order.
+//
 
 import Foundation
 

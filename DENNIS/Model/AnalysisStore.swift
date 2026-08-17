@@ -23,6 +23,7 @@ enum AppMode: String, CaseIterable, Identifiable, Codable {
     case waveform = "Waveform Analysis"
     case pls = "PLS"
     case clustering = "Clustering"
+    case permutation = "Permutation Statistics"
     case stats = "Statistical Analysis"
     var id: String { rawValue }
 
@@ -34,11 +35,12 @@ enum AppMode: String, CaseIterable, Identifiable, Codable {
         case .waveform: "waveform.path.ecg.rectangle"
         case .pls: "arrow.triangle.branch"
         case .clustering: "circle.grid.cross"
+        case .permutation: "point.3.connected.trianglepath.dotted"
         case .stats: "tablecells"
         }
     }
 
-    static let defaultVisible: [AppMode] = [.pca, .tensor, .decoding, .stats]
+    static let defaultVisible: [AppMode] = [.pca, .tensor, .decoding, .permutation, .stats]
 }
 
 @Observable

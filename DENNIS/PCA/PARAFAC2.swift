@@ -9,6 +9,13 @@
 //  orthonormal. The returned CPResult contains a representative average varying
 //  factor, feature loadings, and slice/subject loadings.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Harshman (1972), UCLA Working Papers in Phonetics 22:30-47 — the
+//      PARAFAC2 model.
+//    - Kiers, ten Berge & Bro (1999), J Chemometrics 13(3-4):275-294 — the
+//      direct-fitting algorithm this file implements: orthonormal per-slice
+//      loadings via a shared basis H.
+//
 
 import Foundation
 

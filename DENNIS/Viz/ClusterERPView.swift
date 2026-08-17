@@ -14,6 +14,12 @@
 //  of the interaction. An optional checkbox shades the active temporal-factor
 //  window.
 //
+//  Naming: "cluster" here means a set of channels sharing the sign of a PCA
+//  spatial loading. That is a different concept from the spatiotemporal
+//  statistical clusters in `Stats/` (`SpatiotemporalCluster`, `ClusterGrid`),
+//  which are connected channel × time regions of a test statistic. The two
+//  share the word and nothing else; neither should be renamed to match.
+//
 
 import SwiftUI
 

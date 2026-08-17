@@ -29,6 +29,13 @@ struct TopomapView: View {
     /// When set, electrodes whose |value| ≥ this are drawn as enlarged ringed
     /// markers to flag the supra-threshold topography.
     var highlightThreshold: Double? = nil
+    /// Electrodes drawn as ringed markers regardless of their value — used to
+    /// mark the members of a statistical cluster on a t or F map.
+    var highlightedChannels: Set<Int> = []
+    /// Uses a 0 → max sequential scale instead of the diverging ±max one.
+    /// Intrinsically non-negative maps (F, |t|) have no meaningful midpoint, and
+    /// a diverging scale wastes half its range on values that cannot occur.
+    var usesPositiveSequentialScale: Bool = false
 
     private let interpolationPower: Double = 3
     private let activeSensors: [SensorPosition]
@@ -40,7 +47,9 @@ struct TopomapView: View {
          usesVerticalColorBar: Bool = false,
          canvasMinHeight: CGFloat = 260,
          unitLabel: String = "µV",
-         highlightThreshold: Double? = nil) {
+         highlightThreshold: Double? = nil,
+         highlightedChannels: Set<Int> = [],
+         usesPositiveSequentialScale: Bool = false) {
         self.layout = layout
         self.values = values
         self.timeSeconds = timeSeconds
@@ -51,16 +60,18 @@ struct TopomapView: View {
         self.canvasMinHeight = canvasMinHeight
         self.unitLabel = unitLabel
         self.highlightThreshold = highlightThreshold
+        self.highlightedChannels = highlightedChannels
+        self.usesPositiveSequentialScale = usesPositiveSequentialScale
         let sensors = layout.positions.filter { $0.channelIndex < values.count }
         self.activeSensors = sensors
         if let fixedScale, fixedScale > 0 {
             self.currentScale = fixedScale
         } else {
-            let maxAbs = sensors
+            let extreme = sensors
                 .compactMap { $0.channelIndex < values.count ? values[$0.channelIndex] : nil }
-                .map(abs)
+                .map { usesPositiveSequentialScale ? max($0, 0) : abs($0) }
                 .max() ?? 1
-            self.currentScale = maxAbs > 0 ? maxAbs : 1
+            self.currentScale = extreme > 0 ? extreme : 1
         }
     }
 
@@ -146,9 +157,11 @@ struct TopomapView: View {
 
         drawNoseAndEars(in: &context, center: center, radius: radius)
 
-        // Electrode markers; supra-threshold electrodes get an enlarged ring.
-        for (_, point, value) in points {
-            let supra = highlightThreshold.map { abs(value) >= $0 } ?? false
+        // Electrode markers; supra-threshold and cluster-member electrodes get
+        // an enlarged ring.
+        for (channelIndex, point, value) in points {
+            let supra = highlightedChannels.contains(channelIndex)
+                || (highlightThreshold.map { abs(value) >= $0 } ?? false)
             if supra {
                 let ring = CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
                 context.fill(Path(ellipseIn: ring), with: .color(.black.opacity(0.85)))
@@ -193,8 +206,7 @@ struct TopomapView: View {
             for weighted in cell.weights where weighted.channelIndex < values.count {
                 interpolated += values[weighted.channelIndex] * weighted.weight
             }
-            let color = divergingColor(forNormalized: interpolated / scale)
-            context.fill(Path(cell.rect), with: .color(color))
+            context.fill(Path(cell.rect), with: .color(color(forNormalized: interpolated / scale)))
         }
     }
 
@@ -231,12 +243,13 @@ struct TopomapView: View {
     private var horizontalColorBar: some View {
         let currentScale = scale
         return HStack(spacing: 8) {
-            Text(String(format: "%.1f", -currentScale))
+            Text(usesPositiveSequentialScale ? "0.0" : String(format: "%.1f", -currentScale))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
             LinearGradient(
-                colors: stride(from: -1.0, through: 1.0, by: 0.1).map { divergingColor(forNormalized: $0) },
+                colors: stride(from: usesPositiveSequentialScale ? 0.0 : -1.0, through: 1.0, by: 0.1)
+                    .map { color(forNormalized: $0) },
                 startPoint: .leading,
                 endPoint: .trailing
             )
@@ -257,14 +270,15 @@ struct TopomapView: View {
                 .foregroundStyle(.secondary)
 
             LinearGradient(
-                colors: stride(from: 1.0, through: -1.0, by: -0.1).map { divergingColor(forNormalized: $0) },
+                colors: stride(from: 1.0, through: usesPositiveSequentialScale ? 0.0 : -1.0, by: -0.1)
+                    .map { color(forNormalized: $0) },
                 startPoint: .top,
                 endPoint: .bottom
             )
             .frame(width: 12, height: 190)
             .clipShape(Capsule())
 
-            Text(String(format: "%.1f", -currentScale))
+            Text(usesPositiveSequentialScale ? "0.0" : String(format: "%.1f", -currentScale))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
@@ -273,6 +287,24 @@ struct TopomapView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(width: 42)
+    }
+
+    /// The active color map for `normalized`, in roughly -1...1 (0...1 under a
+    /// sequential scale).
+    private func color(forNormalized normalized: Double) -> Color {
+        usesPositiveSequentialScale
+            ? sequentialColor(forNormalized: normalized)
+            : divergingColor(forNormalized: normalized)
+    }
+
+    /// White–purple sequential map for non-negative statistics.
+    private func sequentialColor(forNormalized normalized: Double) -> Color {
+        let t = max(0, min(1, normalized))
+        return Color(
+            red: 0.96 - 0.52 * t,
+            green: 0.96 - 0.83 * t,
+            blue: 0.98 - 0.23 * t
+        )
     }
 
     /// Diverging blue–white–red map. `normalized` is expected in roughly -1...1.

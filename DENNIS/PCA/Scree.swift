@@ -9,6 +9,11 @@
 //  matches the data. Factors above the rescaled random curve are "retained" by
 //  the parallel test; a cumulative-variance threshold gives a second suggestion.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Horn (1965), Psychometrika 30(2):179-185 — parallel analysis itself.
+//    - Dien (2010), J Neurosci Methods 187(1):138-145 — the ERP PCA Toolkit
+//      workflow this is ported from.
+//
 
 import Foundation
 
