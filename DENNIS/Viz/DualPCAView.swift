@@ -277,6 +277,7 @@ struct TopomapGridView: View {
                 fixedScale: nil,
                 showsHeader: false,
                 canvasMinHeight: 150,
+                unitLabel: "loading",
                 highlightThreshold: threshold > 0 ? threshold : nil
             )
             .frame(height: 180)

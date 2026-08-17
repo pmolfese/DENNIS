@@ -11,16 +11,21 @@ import SwiftUI
 
 struct TopomapView: View {
     let layout: SensorLayout
-    /// Per-channel potential (µV) at the chosen sample, indexed by channel.
+    /// Per-channel value at the chosen sample, indexed by channel. Values are
+    /// typically sensor potentials in µV or dimensionless PCA loadings.
     let values: [Double]
     let timeSeconds: Double
-    /// When non-nil, fixes the symmetric color scale to ±this value (µV).
+    /// When non-nil, fixes the symmetric color scale to ±this value in the
+    /// units given by `unitLabel`.
     /// When nil, the scale auto-fits to the data at this time point.
     let fixedScale: Double?
     var showsHeader: Bool = true
     var interpolationStep: CGFloat = 4
     var usesVerticalColorBar: Bool = false
     var canvasMinHeight: CGFloat = 260
+    /// Unit printed on the colorbar. Sensor voltage maps use µV; loading maps
+    /// pass "loading" so dimensionless PCA values are not mislabeled as voltage.
+    var unitLabel: String = "µV"
     /// When set, electrodes whose |value| ≥ this are drawn as enlarged ringed
     /// markers to flag the supra-threshold topography.
     var highlightThreshold: Double? = nil
@@ -34,6 +39,7 @@ struct TopomapView: View {
          interpolationStep: CGFloat = 4,
          usesVerticalColorBar: Bool = false,
          canvasMinHeight: CGFloat = 260,
+         unitLabel: String = "µV",
          highlightThreshold: Double? = nil) {
         self.layout = layout
         self.values = values
@@ -43,6 +49,7 @@ struct TopomapView: View {
         self.interpolationStep = interpolationStep
         self.usesVerticalColorBar = usesVerticalColorBar
         self.canvasMinHeight = canvasMinHeight
+        self.unitLabel = unitLabel
         self.highlightThreshold = highlightThreshold
         let sensors = layout.positions.filter { $0.channelIndex < values.count }
         self.activeSensors = sensors
@@ -236,7 +243,7 @@ struct TopomapView: View {
             .frame(height: 12)
             .clipShape(Capsule())
 
-            Text(String(format: "+%.1f µV", currentScale))
+            Text(String(format: "+%.1f %@", currentScale, unitLabel))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -261,7 +268,7 @@ struct TopomapView: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            Text("uV")
+            Text(unitLabel)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

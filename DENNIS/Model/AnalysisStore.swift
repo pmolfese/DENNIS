@@ -478,6 +478,9 @@ final class AnalysisStore {
     /// |temporal-loading| threshold that defines that window.
     var highlightTemporalWindow = false
     var temporalThreshold: Double = 0.4
+    /// How the observed-voltage topomap in the Cluster ERP PNG reduces the
+    /// threshold-defined temporal-factor window.
+    var pcaVoltageSummary: PCAVoltageSummary = .peakInWindow
 
     /// Whether cluster-ERP traces show a ±1 standard-error band (across subjects).
     var showStandardError = false
