@@ -1840,6 +1840,12 @@ private struct ClusterTraceChart: View {
 
     private var chart: some View {
         Chart {
+            RectangleMark(
+                xStart: .value("Cluster start", latencyMs(cluster.startSample)),
+                xEnd: .value("Cluster end", latencyMs(cluster.endSample))
+            )
+            .foregroundStyle(Color.yellow.opacity(0.12))
+
             if showsStandardError {
                 ForEach(points) { point in
                     AreaMark(
@@ -1861,11 +1867,17 @@ private struct ClusterTraceChart: View {
                 .lineStyle(StrokeStyle(lineWidth: 1.8))
             }
             RuleMark(x: .value("Cluster start", latencyMs(cluster.startSample)))
-                .foregroundStyle(Color.accentColor.opacity(0.65))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .foregroundStyle(Color.yellow.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+                .annotation(position: .top, alignment: .leading, spacing: 3) {
+                    latencyMarkerLabel(latencyMs(cluster.startSample))
+                }
             RuleMark(x: .value("Cluster end", latencyMs(cluster.endSample)))
-                .foregroundStyle(Color.accentColor.opacity(0.65))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .foregroundStyle(Color.yellow.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+                .annotation(position: .top, alignment: .trailing, spacing: 3) {
+                    latencyMarkerLabel(latencyMs(cluster.endSample))
+                }
         }
         .chartXAxisLabel("Latency (ms)")
         .chartYAxisLabel(output.measureLabel)
@@ -1879,6 +1891,19 @@ private struct ClusterTraceChart: View {
                 }
             }
         }
+        .help("The yellow span and labeled markers show this cluster's observed temporal extent. "
+              + "They do not establish the effect's true onset or imply that every cluster sensor "
+              + "belongs to the cluster at every highlighted sample.")
+    }
+
+    private func latencyMarkerLabel(_ milliseconds: Double) -> some View {
+        Text(String(format: "%.0f ms", milliseconds))
+            .font(.caption2.monospacedDigit().weight(.semibold))
+            .foregroundStyle(.black)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Color.white, in: Capsule())
+            .overlay(Capsule().stroke(Color.yellow.opacity(0.85), lineWidth: 1))
     }
 
     private func color(for series: String) -> Color {
