@@ -62,6 +62,9 @@ nonisolated enum ClusterPermutationAnalyzer {
         let sampleCount: Int
         /// Local channel index -> local neighboring channel indices.
         let spatialAdjacency: [[Int]]
+        /// Additional adjacency graphs swept by ETAC. Empty means reuse
+        /// `spatialAdjacency` as a single radius.
+        let etacSpatialAdjacencies: [[[Int]]]
         let design: Design
 
         init(
@@ -70,6 +73,7 @@ nonisolated enum ClusterPermutationAnalyzer {
             channelCount: Int,
             sampleCount: Int,
             spatialAdjacency: [[Int]],
+            etacSpatialAdjacencies: [[[Int]]] = [],
             design: Design = .independent
         ) {
             self.sampleA = sampleA
@@ -77,6 +81,7 @@ nonisolated enum ClusterPermutationAnalyzer {
             self.channelCount = channelCount
             self.sampleCount = sampleCount
             self.spatialAdjacency = spatialAdjacency
+            self.etacSpatialAdjacencies = etacSpatialAdjacencies
             self.design = design
         }
     }
@@ -87,6 +92,7 @@ nonisolated enum ClusterPermutationAnalyzer {
         var threshold = ClusterFormingThreshold.statistic(2.0)
         var inference = ClusterInferenceMode.clusterMass
         var tfce = TFCEParameters.default
+        var etac = ETACParameters.default
         var seed: UInt64 = 0xE7A_C1A5_7E57
 
         init(
@@ -94,12 +100,14 @@ nonisolated enum ClusterPermutationAnalyzer {
             threshold: ClusterFormingThreshold = .statistic(2.0),
             inference: ClusterInferenceMode = .clusterMass,
             tfce: TFCEParameters = .default,
+            etac: ETACParameters = .default,
             seed: UInt64 = 0xE7A_C1A5_7E57
         ) {
             self.permutationCount = permutationCount
             self.threshold = threshold
             self.inference = inference
             self.tfce = tfce
+            self.etac = etac
             self.seed = seed
         }
     }
@@ -123,6 +131,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         /// The `|t|` actually used to form clusters, after resolving a
         /// probability threshold against the design's df. Nil under TFCE.
         let resolvedThreshold: Double?
+        /// Cluster-forming statistics used by ETAC, permissive to stringent.
+        let resolvedETACThresholds: [Double]?
         let clusters: [Cluster]
         let nullMaximumClusterMasses: [Double]
         let rearrangements: ClusterRearrangementPlan
@@ -150,6 +160,7 @@ nonisolated enum ClusterPermutationAnalyzer {
         guard input.channelCount > 0,
               input.sampleCount > 0,
               input.spatialAdjacency.count == input.channelCount,
+              input.etacSpatialAdjacencies.allSatisfy({ $0.count == input.channelCount }),
               dimensionsMatch else {
             throw AnalysisError.invalidDimensions
         }
@@ -159,6 +170,15 @@ nonisolated enum ClusterPermutationAnalyzer {
         guard configuration.permutationCount > 0 else { throw AnalysisError.invalidConfiguration }
         if configuration.inference == .tfce {
             guard configuration.tfce.isValid else { throw AnalysisError.invalidConfiguration }
+        }
+        if configuration.inference == .etac {
+            guard configuration.etac.isValid else { throw AnalysisError.invalidConfiguration }
+            if !input.etacSpatialAdjacencies.isEmpty {
+                guard input.etacSpatialAdjacencies.count
+                        == configuration.etac.radiusMultipliers.count else {
+                    throw AnalysisError.invalidConfiguration
+                }
+            }
         }
         if input.design == .repeatedMeasures, nA != nB {
             throw AnalysisError.unbalancedPairs
@@ -178,6 +198,18 @@ nonisolated enum ClusterPermutationAnalyzer {
         } else {
             resolvedThreshold = nil
         }
+        let resolvedETACThresholds: [Double]?
+        if configuration.inference == .etac {
+            let values = configuration.etac.orderedProbabilities.compactMap {
+                resolveThreshold(.probability($0), degreesOfFreedom: degreesOfFreedom)
+            }
+            guard values.count == configuration.etac.thresholdProbabilities.count else {
+                throw AnalysisError.invalidConfiguration
+            }
+            resolvedETACThresholds = values
+        } else {
+            resolvedETACThresholds = nil
+        }
 
         let plan = ClusterRearrangements.plan(
             rearrangementKind(input: input),
@@ -189,6 +221,13 @@ nonisolated enum ClusterPermutationAnalyzer {
             sampleCount: input.sampleCount,
             spatialAdjacency: input.spatialAdjacency
         )
+        let etacGrids = input.etacSpatialAdjacencies.map {
+            ClusterGrid(
+                channelCount: input.channelCount,
+                sampleCount: input.sampleCount,
+                spatialAdjacency: $0
+            )
+        }
 
         switch input.design {
         case .independent:
@@ -199,6 +238,8 @@ nonisolated enum ClusterPermutationAnalyzer {
                 grid: grid,
                 degreesOfFreedom: degreesOfFreedom,
                 resolvedThreshold: resolvedThreshold,
+                resolvedETACThresholds: resolvedETACThresholds,
+                etacGrids: etacGrids,
                 progress: progress
             )
         case .repeatedMeasures:
@@ -209,6 +250,8 @@ nonisolated enum ClusterPermutationAnalyzer {
                 grid: grid,
                 degreesOfFreedom: degreesOfFreedom,
                 resolvedThreshold: resolvedThreshold,
+                resolvedETACThresholds: resolvedETACThresholds,
+                etacGrids: etacGrids,
                 progress: progress
             )
         }
@@ -249,6 +292,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         grid: ClusterGrid,
         degreesOfFreedom: Double,
         resolvedThreshold: Double?,
+        resolvedETACThresholds: [Double]?,
+        etacGrids: [ClusterGrid],
         progress: (@Sendable (Double) -> Void)?
     ) throws -> Result? {
         let featureCount = grid.featureCount
@@ -285,6 +330,8 @@ nonisolated enum ClusterPermutationAnalyzer {
             configuration: configuration,
             plan: plan,
             resolvedThreshold: resolvedThreshold,
+            resolvedETACThresholds: resolvedETACThresholds,
+            etacGrids: etacGrids,
             observed: observed,
             progress: progress
         ) { _, arrangement, rng, _ in
@@ -324,6 +371,7 @@ nonisolated enum ClusterPermutationAnalyzer {
             observedTFCEScores: outcome.tfceScores,
             pointPValues: outcome.pointPValues,
             resolvedThreshold: resolvedThreshold,
+            resolvedETACThresholds: resolvedETACThresholds,
             clusters: outcome.clusters,
             nullMaximumClusterMasses: outcome.nullMaxima,
             rearrangements: plan,
@@ -372,6 +420,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         grid: ClusterGrid,
         degreesOfFreedom: Double,
         resolvedThreshold: Double?,
+        resolvedETACThresholds: [Double]?,
+        etacGrids: [ClusterGrid],
         progress: (@Sendable (Double) -> Void)?
     ) throws -> Result? {
         let featureCount = grid.featureCount
@@ -414,6 +464,8 @@ nonisolated enum ClusterPermutationAnalyzer {
             configuration: configuration,
             plan: plan,
             resolvedThreshold: resolvedThreshold,
+            resolvedETACThresholds: resolvedETACThresholds,
+            etacGrids: etacGrids,
             observed: observed,
             progress: progress
         ) { _, arrangement, rng, _ in
@@ -450,6 +502,7 @@ nonisolated enum ClusterPermutationAnalyzer {
             observedTFCEScores: outcome.tfceScores,
             pointPValues: outcome.pointPValues,
             resolvedThreshold: resolvedThreshold,
+            resolvedETACThresholds: resolvedETACThresholds,
             clusters: outcome.clusters,
             nullMaximumClusterMasses: outcome.nullMaxima,
             rearrangements: plan,
@@ -506,6 +559,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         configuration: Configuration,
         plan: ClusterRearrangementPlan,
         resolvedThreshold: Double?,
+        resolvedETACThresholds: [Double]? = nil,
+        etacGrids: [ClusterGrid] = [],
         observed: [Double],
         signed: Bool = true,
         progress: (@Sendable (Double) -> Void)?,
@@ -516,7 +571,13 @@ nonisolated enum ClusterPermutationAnalyzer {
         var seedSource = SplitMix64(seed: configuration.seed)
         let permutationSeeds = (0..<plan.count).map { _ in seedSource.next() }
         let arrangements = plan.arrangements
-        let nullStorage = PermutationValueStorage(count: plan.count)
+        let etacThresholds = resolvedETACThresholds ?? []
+        let radiusGrids = etacGrids.isEmpty ? [grid] : etacGrids
+        let subtestCount = configuration.inference == .etac
+            ? etacThresholds.count * radiusGrids.count
+            : 1
+        guard subtestCount > 0 else { throw AnalysisError.invalidConfiguration }
+        let nullStorage = PermutationValueStorage(count: plan.count * subtestCount)
         defer { nullStorage.deallocate() }
 
         let observedTFCE: [Double]? = configuration.inference == .tfce
@@ -558,17 +619,31 @@ nonisolated enum ClusterPermutationAnalyzer {
                         parameters: tfceParameters
                     )
                     nullStorage[permutation] = scores.reduce(0) { max($0, abs($1)) }
+                case .etac:
+                    for radius in radiusGrids.indices {
+                        for thresholdIndex in etacThresholds.indices {
+                            let subtest = radius * etacThresholds.count + thresholdIndex
+                            nullStorage[permutation * subtestCount + subtest] = radiusGrids[radius]
+                                .maximumClusterMass(
+                                    statistics: statistics,
+                                    threshold: etacThresholds[thresholdIndex],
+                                    signed: signed,
+                                    workspace: workspace
+                                )
+                        }
+                    }
                 }
             }
             completed += batchCount
             progress?(Double(completed) / Double(plan.count))
         }
-        let nullMaxima = nullStorage.values
+        let storedNull = nullStorage.values
         let exhaustive = plan.isExhaustive
 
         let workspace = grid.makeWorkspace()
         switch inference {
         case .clusterMass:
+            let nullMaxima = storedNull
             let candidates = grid.formClusters(
                 statistics: observed,
                 threshold: threshold,
@@ -598,6 +673,7 @@ nonisolated enum ClusterPermutationAnalyzer {
                 pointPValues: nil
             )
         case .tfce:
+            let nullMaxima = storedNull
             let scores = observedTFCE ?? []
             let pointPValues = ClusterCorrection.pointPValues(
                 scores: scores,
@@ -630,6 +706,81 @@ nonisolated enum ClusterPermutationAnalyzer {
                 clusters: ClusterCorrection.sortedForDisplay(clusters),
                 nullMaxima: nullMaxima,
                 tfceScores: scores,
+                pointPValues: pointPValues
+            )
+        case .etac:
+            let maximaBySubtest = (0..<subtestCount).map { subtest in
+                (0..<plan.count).map { storedNull[$0 * subtestCount + subtest] }
+            }
+            guard let nullMinimumPValues = ETACCorrection.nullMinimumPValues(
+                maximaBySubtest: maximaBySubtest
+            ) else { throw AnalysisError.invalidConfiguration }
+            let sortedNullMinima = nullMinimumPValues.sorted()
+            let sortedMaxima = maximaBySubtest.map { $0.sorted() }
+
+            // A point inherits the strongest jointly-corrected cluster
+            // evidence from any threshold whose cluster contains it. The final
+            // connected components are display groupings of the ETAC union;
+            // the calibrated subtest clusters remain the inferential units.
+            var pointPValues = [Double](repeating: 1, count: grid.featureCount)
+            for radius in radiusGrids.indices {
+                for thresholdIndex in etacThresholds.indices {
+                    let subtest = radius * etacThresholds.count + thresholdIndex
+                    let candidates = radiusGrids[radius].formClusters(
+                        statistics: observed,
+                        threshold: etacThresholds[thresholdIndex],
+                        signed: signed,
+                        workspace: workspace
+                    )
+                    for candidate in candidates {
+                        let marginal = ETACCorrection.marginalPValue(
+                            clusterMass: candidate.mass,
+                            sortedNullMaxima: sortedMaxima[subtest],
+                            exhaustive: exhaustive
+                        )
+                        let combined = ETACCorrection.combinedPValue(
+                            minimumMarginalP: marginal,
+                            sortedNullMinimumPValues: sortedNullMinima,
+                            exhaustive: exhaustive
+                        )
+                        guard combined <= 0.10 else { continue }
+                        for point in candidate.points {
+                            pointPValues[point] = min(pointPValues[point], combined)
+                        }
+                    }
+                }
+            }
+
+            // The broadest radius is last because the runner orders radii
+            // ascending. It is used only to group the already-significant union
+            // for display; every inferential p-value was calibrated above on
+            // its originating threshold × radius subtest.
+            let displayGrid = radiusGrids.last ?? grid
+            let candidates = displayGrid.componentsOfSignificantPoints(
+                scores: observed,
+                pValues: pointPValues,
+                alpha: 0.10,
+                signed: signed,
+                workspace: workspace
+            )
+            let clusters = candidates.map { candidate in
+                Cluster(
+                    id: 0,
+                    sign: candidate.sign,
+                    pointIndices: candidate.points,
+                    mass: candidate.points.reduce(0) { $0 + abs(observed[$1]) },
+                    pValue: candidate.points.map { pointPValues[$0] }.min() ?? 1,
+                    startSample: candidate.startSample,
+                    endSample: candidate.endSample,
+                    channelIndices: candidate.channels
+                )
+            }
+            return PermutationOutcome(
+                clusters: ClusterCorrection.sortedForDisplay(clusters),
+                // Under ETAC this is the calibrated null statistic (minimum
+                // marginal p), not a raw cluster-mass distribution.
+                nullMaxima: nullMinimumPValues,
+                tfceScores: nil,
                 pointPValues: pointPValues
             )
         }

@@ -42,6 +42,7 @@ struct PermutationStatisticsView: View {
     @State private var alpha = 0.05
     @State private var inference: ClusterInferenceMode = .clusterMass
     @State private var tfce = TFCEParameters.default
+    @State private var etac = ETACParameters.default
     @State private var usesProbabilityThreshold = true
     @State private var thresholdProbability = 0.05
     @State private var thresholdT = 2.0
@@ -317,12 +318,28 @@ struct PermutationStatisticsView: View {
 
     private var previewedAdjacency: ClusterAdjacencySummary? {
         guard sensorLayout != nil, !analysisChannels.isEmpty else { return nil }
+        let configuration: ClusterAdjacencyConfiguration
+        if inference == .etac, let spacing = previewedNearestNeighborSpacing {
+            configuration = ClusterAdjacencyConfiguration(
+                method: .distance,
+                distance: min((etac.orderedRadiusMultipliers.last ?? 1) * spacing, 2)
+            )
+        } else {
+            configuration = adjacency
+        }
         return ClusterSpatialAdjacency.summarize(
             ClusterSpatialAdjacency.build(
                 channelIndices: analysisChannels,
                 layout: sensorLayout,
-                configuration: adjacency
+                configuration: configuration
             )
+        )
+    }
+
+    private var previewedNearestNeighborSpacing: Double? {
+        ClusterSpatialAdjacency.medianNearestNeighborDistance(
+            channelIndices: analysisChannels,
+            layout: sensorLayout
         )
     }
 
@@ -330,10 +347,14 @@ struct PermutationStatisticsView: View {
         guard let design, design.isValid, !isRunning else { return false }
         let counts = plannedCellCounts
         guard !counts.isEmpty, counts.allSatisfy({ $0 >= 2 }) else { return false }
-        guard adjacency.isValid, windowEndMs > windowStartMs, permutationCount > 0, sampleStride > 0 else {
+        guard (inference == .etac || adjacency.isValid),
+              windowEndMs > windowStartMs,
+              permutationCount > 0,
+              sampleStride > 0 else {
             return false
         }
         if inference == .tfce { return tfce.isValid }
+        if inference == .etac { return etac.isValid }
         if usesProbabilityThreshold { return thresholdProbability > 0 && thresholdProbability < 1 }
         return (design.statisticKind == .f ? thresholdF : thresholdT) > 0
     }
@@ -349,6 +370,7 @@ struct PermutationStatisticsView: View {
         let threshold: ClusterFormingThreshold
         let inference: ClusterInferenceMode
         let tfce: TFCEParameters
+        let etac: ETACParameters
         let adjacency: ClusterAdjacencyConfiguration
         let subjects: [String]
     }
@@ -364,6 +386,7 @@ struct PermutationStatisticsView: View {
             threshold: thresholdSpecification,
             inference: inference,
             tfce: tfce,
+            etac: etac,
             adjacency: adjacency,
             subjects: members.map(\.name)
         )
@@ -502,15 +525,26 @@ struct PermutationStatisticsView: View {
                     .labelsHidden().frame(width: 132).disabled(isRunning)
                 }
                 .help(inference.explanation)
-                labeled("Sensor neighbors", help: Self.neighborsHelp) {
-                    Picker("", selection: $adjacency.method) {
-                        ForEach(ClusterAdjacencyMethod.allCases) { Text($0.rawValue).tag($0) }
+                if inference == .etac {
+                    labeled("Sensor radius basis", help: Self.etacHelp) {
+                        Text(previewedNearestNeighborSpacing.map {
+                            "median nearest = \(String(format: "%.3f", $0)) r"
+                        } ?? "time only — no layout")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 156, alignment: .leading)
                     }
-                    .labelsHidden().frame(width: 132)
-                    .disabled(isRunning || sensorLayout == nil)
+                } else {
+                    labeled("Sensor neighbors", help: Self.neighborsHelp) {
+                        Picker("", selection: $adjacency.method) {
+                            ForEach(ClusterAdjacencyMethod.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 132)
+                        .disabled(isRunning || sensorLayout == nil)
+                    }
+                    .help(adjacency.method.explanation)
+                    adjacencyParameter
                 }
-                .help(adjacency.method.explanation)
-                adjacencyParameter
                 Spacer()
             }
 
@@ -523,7 +557,7 @@ struct PermutationStatisticsView: View {
                     }
                     .labelsHidden().frame(width: 132).disabled(isRunning)
                 }
-                if inference == .clusterMass { thresholdControl } else { tfceControls }
+                inferenceControls
                 labeled("Cluster α", help: Self.alphaHelp) {
                     Picker("", selection: $alpha) {
                         Text(".01").tag(0.01)
@@ -557,9 +591,7 @@ struct PermutationStatisticsView: View {
             epochList
 
             HStack(alignment: .top, spacing: 4) {
-                Text(inference == .tfce
-                     ? "TFCE corrects each channel × time point against the permutation distribution of the largest enhanced score. Points listed together below are a readability grouping, not the inference unit."
-                     : "Corrected p-values apply to whole clusters. Their member sensors and time samples should not be interpreted as independently significant or as precise spatial or temporal boundaries.")
+                Text(interpretationCaveat)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 HelpButton(text: Self.interpretationHelp).imageScale(.small).font(.caption2)
@@ -586,10 +618,24 @@ struct PermutationStatisticsView: View {
 
     private var designSubtitle: String {
         guard let design else { return "Subjects are the exchangeable unit." }
-        let correction = inference == .tfce
-            ? "threshold-free cluster enhancement"
-            : "maximum cluster-mass correction"
+        let correction: String
+        switch inference {
+        case .clusterMass: correction = "maximum cluster-mass correction"
+        case .tfce: correction = "threshold-free cluster enhancement"
+        case .etac: correction = "multi-threshold, multi-radius ETAC-EEG correction"
+        }
         return "\(design.name) · \(correction)"
+    }
+
+    private var interpretationCaveat: String {
+        switch inference {
+        case .clusterMass:
+            return "Corrected p-values apply to whole clusters. Their member sensors and time samples should not be interpreted as independently significant or as precise spatial or temporal boundaries."
+        case .tfce:
+            return "TFCE corrects each channel × time point against the permutation distribution of the largest enhanced score. Points listed together below are a readability grouping, not the inference unit."
+        case .etac:
+            return "ETAC-EEG corrects the union of cluster subtests across the displayed p thresholds and montage-relative sensor radii. Listed regions group overlapping surviving subtest clusters for readability; their points are not independent significance claims or precise boundaries."
+        }
     }
 
     private var statusRow: some View {
@@ -599,7 +645,9 @@ struct PermutationStatisticsView: View {
                     .foregroundStyle(.orange)
             } else if let summary = previewedAdjacency {
                 Label(
-                    String(format: "%.1f neighbors per sensor", summary.meanNeighborCount),
+                    inference == .etac
+                        ? String(format: "%.1f neighbors at broadest ETAC radius", summary.meanNeighborCount)
+                        : String(format: "%.1f neighbors per sensor", summary.meanNeighborCount),
                     systemImage: summary.isDegenerate || summary.isOverConnected
                         ? "exclamationmark.triangle"
                         : "point.3.connected.trianglepath.dotted"
@@ -731,6 +779,18 @@ struct PermutationStatisticsView: View {
         }
     }
 
+    @ViewBuilder
+    private var inferenceControls: some View {
+        switch inference {
+        case .clusterMass:
+            thresholdControl
+        case .tfce:
+            tfceControls
+        case .etac:
+            etacControls
+        }
+    }
+
     private var tfceControls: some View {
         HStack(alignment: .bottom, spacing: 10) {
             labeled("TFCE E", help: Self.correctionHelp) {
@@ -746,6 +806,45 @@ struct PermutationStatisticsView: View {
             labeled("Steps") {
                 Stepper("\(tfce.stepCount)", value: $tfce.stepCount, in: 2...500, step: 10)
                     .frame(width: 88).disabled(isRunning)
+            }
+        }
+    }
+
+    private var etacControls: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .bottom, spacing: 8) {
+                ForEach(etac.thresholdProbabilities.indices, id: \.self) { index in
+                    labeled("Cluster p\(index + 1)", help: index == 0 ? Self.etacHelp : nil) {
+                        TextField(
+                            "",
+                            value: Binding(
+                                get: { etac.thresholdProbabilities[index] },
+                                set: { etac.thresholdProbabilities[index] = $0 }
+                            ),
+                            format: .number.precision(.fractionLength(3))
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 62)
+                        .disabled(isRunning)
+                    }
+                }
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                ForEach(etac.radiusMultipliers.indices, id: \.self) { index in
+                    labeled("Radius \(index + 1) × NN") {
+                        TextField(
+                            "",
+                            value: Binding(
+                                get: { etac.radiusMultipliers[index] },
+                                set: { etac.radiusMultipliers[index] = $0 }
+                            ),
+                            format: .number.precision(.fractionLength(2))
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 62)
+                        .disabled(isRunning || sensorLayout == nil)
+                    }
+                }
             }
         }
     }
@@ -1218,8 +1317,26 @@ struct PermutationStatisticsView: View {
             parts.append(threshold)
         case .tfce:
             parts.append("TFCE E=\(String(format: "%.2g", analysis.tfce.extentExponent)) H=\(String(format: "%.2g", analysis.tfce.heightExponent)) · \(analysis.tfce.stepCount) steps")
+        case .etac:
+            let probabilities = analysis.etac.orderedProbabilities
+                .map { formatP($0) }
+                .joined(separator: ", ")
+            let criticals = (analysis.resolvedETACThresholds ?? [])
+                .map { String(format: "%.2f", $0) }
+                .joined(separator: ", ")
+            if let resolvedRadii = analysis.resolvedETACRadii, !resolvedRadii.isEmpty {
+                let multipliers = analysis.etac.orderedRadiusMultipliers
+                    .map { String(format: "%.2g", $0) }
+                    .joined(separator: ", ")
+                let radii = resolvedRadii
+                    .map { String(format: "%.3f", $0) }
+                    .joined(separator: ", ")
+                parts.append("ETAC-EEG cluster p=[\(probabilities)] · \(analysis.statistic.symbol)=[\(criticals)] · radii=[\(multipliers)]× median NN ([\(radii)] r) · equitable minP union")
+            } else {
+                parts.append("ETAC-EEG cluster p=[\(probabilities)] · \(analysis.statistic.symbol)=[\(criticals)] · temporal-only graph (no sensor layout) · equitable minP union")
+            }
         }
-        parts.append(adjacencyDescription(output))
+        if analysis.inference != .etac { parts.append(adjacencyDescription(output)) }
         if let numerator = analysis.numeratorDegreesOfFreedom {
             parts.append("df=(\(numerator), \(analysis.denominatorDegreesOfFreedom))")
         } else {
@@ -1401,6 +1518,7 @@ struct PermutationStatisticsView: View {
             threshold: thresholdSpecification,
             inference: inference,
             tfce: tfce,
+            etac: etac,
             adjacency: sensorLayout == nil
                 ? ClusterAdjacencyConfiguration(method: .temporalOnly)
                 : adjacency,
@@ -1527,6 +1645,29 @@ extension PermutationStatisticsView {
     • TFCE — every point is scored by integrating cluster extent over all possible \
     thresholds, removing that choice. Correction is then point-wise, and it costs \
     more computation.
+
+    • ETAC-EEG — cluster tests are run over a grid of uncorrected p thresholds and \
+    montage-relative sensor radii. Each subtest's maximum-cluster null is converted \
+    to a marginal p scale, then the minimum p across the grid is permutation-calibrated. \
+    This controls the union while balancing focal/strong and broad/weak clusters.
+    """, References.forClusterInference)
+
+    static let etacHelp = help("""
+    ETAC-EEG runs one maximum-cluster-mass subtest at each listed uncorrected p \
+    threshold and montage-relative sensor radius, using the same permutation maps.
+
+    Each radius is a multiplier of the montage's median nearest-neighbor spacing. \
+    This makes the sweep scale with sensor density instead of silently meaning \
+    something different on 32-, 128-, and 256-channel arrays.
+
+    Raw masses are not compared across thresholds. DENNIS rank-transforms each \
+    subtest against its own null, then calibrates the minimum marginal p-value \
+    across the set against the permutation distribution of that same minimum. \
+    The resulting union has one jointly corrected p-value scale.
+
+    The default 1.25×, 1.7×, and 2.1× sweep ranges from the immediate local ring \
+    to a modestly broader graph. The p thresholds and radii form a complete grid, \
+    and the minP calibration corrects their union together.
     """, References.forClusterInference)
 
     static let thresholdHelp = help("""

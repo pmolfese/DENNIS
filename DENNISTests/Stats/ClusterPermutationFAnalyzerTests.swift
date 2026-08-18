@@ -289,4 +289,36 @@ struct ClusterPermutationFAnalyzerTests {
         #expect(cluster.startSample <= 5)
         #expect(cluster.endSample >= 7)
     }
+
+    @Test func etacWorksForTheOmnibusF() throws {
+        var rng = SplitMix64(seed: 0xE7AC_0002)
+        let sampleCount = 12
+        func units(effect: Double) -> [[Double]] {
+            (0..<12).map { _ in
+                (0..<sampleCount).map { sample in
+                    ((4...8).contains(sample) ? effect : 0)
+                        + Double.random(in: -0.6...0.6, using: &rng)
+                }
+            }
+        }
+        let result = try #require(try ClusterPermutationFAnalyzer.analyze(
+            input: .init(
+                levels: [
+                    .init(name: "A", units: units(effect: 0)),
+                    .init(name: "B", units: units(effect: 2.0)),
+                    .init(name: "C", units: units(effect: -2.0)),
+                ],
+                channelCount: 1,
+                sampleCount: sampleCount,
+                spatialAdjacency: [[]],
+                etacSpatialAdjacencies: [[[]], [[]], [[]]]
+            ),
+            configuration: .init(permutationCount: 299, inference: .etac, seed: 61)
+        ))
+        #expect(result.resolvedETACThresholds?.count == 3)
+        let cluster = try #require(result.clusters.first)
+        #expect(cluster.pValue < 0.05)
+        #expect(cluster.startSample <= 5)
+        #expect(cluster.endSample >= 7)
+    }
 }

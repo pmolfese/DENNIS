@@ -60,6 +60,19 @@ nonisolated enum References {
             + "extent (E = 0.5) and height (H = 2) exponents."
     )
 
+    static let coxETAC = Reference(
+        key: "cox2019",
+        short: "Cox (2019)",
+        citation: """
+        Cox, R. W. (2019). Equitable Thresholding and Clustering: A novel method \
+        for functional magnetic resonance imaging clustering in AFNI. Brain \
+        Connectivity, 9(7), 529–538.
+        """,
+        supports: "The ETAC strategy of balancing multiple cluster subtests on "
+            + "a common false-positive scale and using their jointly calibrated "
+            + "union to reduce dependence on one arbitrary forming threshold."
+    )
+
     static let nicholsHolmes = Reference(
         key: "nichols2002",
         short: "Nichols & Holmes (2002)",
@@ -350,7 +363,7 @@ nonisolated enum References {
 
     /// Everything, in the order a combined methods section would introduce it.
     static let all: [Reference] = [
-        marisOostenveld, smithNichols, nicholsHolmes, groppe,
+        marisOostenveld, smithNichols, coxETAC, nicholsHolmes, groppe,
         sassenhagen,
         ernst, phipsonSmyth, winkler, andersonTerBraak,
         fieldtrip,
@@ -362,15 +375,15 @@ nonisolated enum References {
     ]
 
     // Cluster permutation (Permutation Statistics pane).
-    static let forClusterMethod: [Reference] = [marisOostenveld, smithNichols, nicholsHolmes]
+    static let forClusterMethod: [Reference] = [marisOostenveld, smithNichols, coxETAC, nicholsHolmes]
     static let forClusterDesign: [Reference] = [winkler, andersonTerBraak, nicholsHolmes]
     static let forClusterThreshold: [Reference] = [marisOostenveld, groppe]
-    static let forClusterInference: [Reference] = [marisOostenveld, smithNichols]
+    static let forClusterInference: [Reference] = [marisOostenveld, smithNichols, coxETAC]
     static let forClusterAdjacency: [Reference] = [fieldtrip, marisOostenveld]
     static let forClusterPermutationCount: [Reference] = [ernst, phipsonSmyth]
     static let forClusterInterpretation: [Reference] = [sassenhagen, marisOostenveld]
     static let forCluster: [Reference] = [
-        marisOostenveld, smithNichols, nicholsHolmes, groppe, sassenhagen,
+        marisOostenveld, smithNichols, coxETAC, nicholsHolmes, groppe, sassenhagen,
         ernst, phipsonSmyth, winkler, andersonTerBraak, fieldtrip, lanczos, lentz,
     ]
 

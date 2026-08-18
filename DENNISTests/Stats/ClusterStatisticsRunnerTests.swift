@@ -105,6 +105,49 @@ struct ClusterStatisticsRunnerTests {
         #expect(prepared.relativeSampleOffsets == [0, 3, 6, 9, 12, 15])
     }
 
+    @Test func etacBuildsTheThresholdByMontageRelativeRadiusGrid() throws {
+        let subjects = (0..<6).map {
+            subject(
+                name: "S\($0)",
+                conditions: ["A": (0, 1), "B": (0, 0)],
+                channelCount: 4
+            )
+        }
+        let layout = SensorLayout(
+            name: "Irregular line",
+            positions: [
+                SensorPosition(channelIndex: 0, x: 0.0, y: 0),
+                SensorPosition(channelIndex: 1, x: 0.1, y: 0),
+                SensorPosition(channelIndex: 2, x: 0.2, y: 0),
+                SensorPosition(channelIndex: 3, x: 0.4, y: 0),
+            ]
+        )
+        let prepared = try ClusterStatisticsRunner.prepare(
+            job: ClusterPermutationJob(
+                design: .withinPairedT(conditionA: "A", conditionB: "B"),
+                subjects: subjects,
+                sensorLayout: layout,
+                windowStartMs: 0,
+                windowEndMs: 60,
+                permutationCount: 31,
+                inference: .etac
+            )
+        )
+
+        #expect(abs((prepared.nearestNeighborSpacing ?? 0) - 0.1) < 1e-12)
+        let radii = try #require(prepared.resolvedETACRadii)
+        #expect(radii.count == 3)
+        #expect(abs(radii[0] - 0.125) < 1e-12)
+        #expect(abs(radii[1] - 0.17) < 1e-12)
+        #expect(abs(radii[2] - 0.21) < 1e-12)
+        #expect(prepared.etacSpatialAdjacencies.count == 3)
+
+        let summaries = prepared.etacSpatialAdjacencies.map(ClusterSpatialAdjacency.summarize)
+        #expect(summaries[0].isolatedChannelCount == 1)
+        #expect(summaries[2].isolatedChannelCount == 0)
+        #expect(summaries[2].meanNeighborCount > summaries[0].meanNeighborCount)
+    }
+
     @Test func aWindowOutsideTheEpochIsRefusedWithTheAvailableRangeAndTheLimitingSubjects() {
         var subjects = (0..<4).map {
             subject(name: "S\($0)", conditions: ["A": (0, 1), "B": (0, 0)])

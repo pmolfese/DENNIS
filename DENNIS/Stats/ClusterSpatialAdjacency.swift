@@ -186,10 +186,27 @@ nonisolated enum ClusterSpatialAdjacency {
     /// enormously in density, so a fixed default radius would be wrong for most
     /// of them.
     static func suggestedDistance(channelIndices: [Int], layout: SensorLayout?) -> Double? {
+        guard let median = medianNearestNeighborDistance(
+            channelIndices: channelIndices,
+            layout: layout
+        ) else { return nil }
+        // 1.7x the median spacing reaches the first ring of a roughly
+        // hexagonal layout without jumping to the second.
+        return (median * 1.7 * 100).rounded() / 100
+    }
+
+    /// Median distance from each located sensor to its closest peer, in
+    /// normalized head-radius units. ETAC-EEG uses this montage-specific scale
+    /// as the basis for its radius sweep, so the same multipliers remain
+    /// meaningful across sparse and dense arrays.
+    static func medianNearestNeighborDistance(
+        channelIndices: [Int],
+        layout: SensorLayout?
+    ) -> Double? {
         guard let layout else { return nil }
         let positions = Dictionary(uniqueKeysWithValues: layout.positions.map { ($0.channelIndex, $0) })
         let located = channelIndices.compactMap { positions[$0] }
-        guard located.count > 2 else { return nil }
+        guard located.count > 1 else { return nil }
 
         var nearestDistances: [Double] = []
         nearestDistances.reserveCapacity(located.count)
@@ -204,9 +221,13 @@ nonisolated enum ClusterSpatialAdjacency {
         }
         guard !nearestDistances.isEmpty else { return nil }
         nearestDistances.sort()
-        let median = nearestDistances[nearestDistances.count / 2]
-        // 1.7x the median spacing reaches the first ring of a roughly
-        // hexagonal layout without jumping to the second.
-        return (median * 1.7 * 100).rounded() / 100
+        let middle = nearestDistances.count / 2
+        let median: Double
+        if nearestDistances.count.isMultiple(of: 2) {
+            median = (nearestDistances[middle - 1] + nearestDistances[middle]) / 2
+        } else {
+            median = nearestDistances[middle]
+        }
+        return median > 0 && median.isFinite ? median : nil
     }
 }

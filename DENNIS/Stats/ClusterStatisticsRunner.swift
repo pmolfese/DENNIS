@@ -69,6 +69,7 @@ nonisolated struct ClusterPermutationJob: Sendable {
     let threshold: ClusterFormingThreshold
     let inference: ClusterInferenceMode
     let tfce: TFCEParameters
+    let etac: ETACParameters
     let adjacency: ClusterAdjacencyConfiguration
     let seed: UInt64
 
@@ -83,6 +84,7 @@ nonisolated struct ClusterPermutationJob: Sendable {
         threshold: ClusterFormingThreshold = .probability(0.05),
         inference: ClusterInferenceMode = .clusterMass,
         tfce: TFCEParameters = .default,
+        etac: ETACParameters = .default,
         adjacency: ClusterAdjacencyConfiguration = .default,
         seed: UInt64 = 0xDE_115_C1A5_7E57
     ) {
@@ -96,6 +98,7 @@ nonisolated struct ClusterPermutationJob: Sendable {
         self.threshold = threshold
         self.inference = inference
         self.tfce = tfce
+        self.etac = etac
         self.adjacency = adjacency
         self.seed = seed
     }
@@ -123,9 +126,14 @@ nonisolated struct ClusterPermutationAnalysis: Sendable {
     let rearrangements: ClusterRearrangementPlan
     let inference: ClusterInferenceMode
     let tfce: TFCEParameters
+    let etac: ETACParameters
     /// The statistic value clusters were formed at, after resolving a
     /// probability threshold. Nil under TFCE.
     let resolvedThreshold: Double?
+    let resolvedETACThresholds: [Double]?
+    /// Montage-relative radii actually used by ETAC, in normalized head units.
+    let resolvedETACRadii: [Double]?
+    let etacNearestNeighborSpacing: Double?
     let thresholdSpecification: ClusterFormingThreshold
 }
 
@@ -212,9 +220,18 @@ nonisolated enum ClusterStatisticsRunner {
             if Task.isCancelled { return .cancelled }
 
             let workers = WorkerPool.maxWorkers(for: job.permutationCount)
-            progress?(0.08, job.inference == .tfce
-                      ? "Integrating cluster extent on \(workers) CPU workers."
-                      : "Permuting labels on \(workers) CPU workers.")
+            let stage: String
+            switch job.inference {
+            case .clusterMass: stage = "Permuting labels on \(workers) CPU workers."
+            case .tfce: stage = "Integrating cluster extent on \(workers) CPU workers."
+            case .etac:
+                let radiusCount = prepared.etacSpatialAdjacencies.isEmpty
+                    ? 1
+                    : prepared.etacSpatialAdjacencies.count
+                let subtests = job.etac.thresholdProbabilities.count * radiusCount
+                stage = "Combining \(subtests) threshold × radius subtests on \(workers) CPU workers."
+            }
+            progress?(0.08, stage)
             let permutationProgress: (@Sendable (Double) -> Void)? = progress.map { report in
                 { fraction in
                     report(0.08 + 0.88 * fraction, "Permuting: \(Int((fraction * 100).rounded()))% complete.")
@@ -283,6 +300,7 @@ nonisolated enum ClusterStatisticsRunner {
                     channelCount: channelCount,
                     sampleCount: sampleCount,
                     spatialAdjacency: prepared.spatialAdjacency,
+                    etacSpatialAdjacencies: prepared.etacSpatialAdjacencies,
                     design: paired ? .repeatedMeasures : .independent
                 ),
                 configuration: .init(
@@ -290,6 +308,7 @@ nonisolated enum ClusterStatisticsRunner {
                     threshold: job.threshold,
                     inference: job.inference,
                     tfce: job.tfce,
+                    etac: job.etac,
                     seed: job.seed
                 ),
                 progress: progress
@@ -311,7 +330,11 @@ nonisolated enum ClusterStatisticsRunner {
                 rearrangements: result.rearrangements,
                 inference: result.configuration.inference,
                 tfce: result.configuration.tfce,
+                etac: result.configuration.etac,
                 resolvedThreshold: result.resolvedThreshold,
+                resolvedETACThresholds: result.resolvedETACThresholds,
+                resolvedETACRadii: prepared.resolvedETACRadii,
+                etacNearestNeighborSpacing: prepared.nearestNeighborSpacing,
                 thresholdSpecification: result.configuration.threshold
             )
 
@@ -322,6 +345,7 @@ nonisolated enum ClusterStatisticsRunner {
                     channelCount: channelCount,
                     sampleCount: sampleCount,
                     spatialAdjacency: prepared.spatialAdjacency,
+                    etacSpatialAdjacencies: prepared.etacSpatialAdjacencies,
                     design: paired ? .repeatedMeasures : .independent
                 ),
                 configuration: .init(
@@ -329,6 +353,7 @@ nonisolated enum ClusterStatisticsRunner {
                     threshold: job.threshold,
                     inference: job.inference,
                     tfce: job.tfce,
+                    etac: job.etac,
                     seed: job.seed
                 ),
                 progress: progress
@@ -350,7 +375,11 @@ nonisolated enum ClusterStatisticsRunner {
                 rearrangements: result.rearrangements,
                 inference: result.configuration.inference,
                 tfce: result.configuration.tfce,
+                etac: result.configuration.etac,
                 resolvedThreshold: result.resolvedThreshold,
+                resolvedETACThresholds: result.resolvedETACThresholds,
+                resolvedETACRadii: prepared.resolvedETACRadii,
+                etacNearestNeighborSpacing: prepared.nearestNeighborSpacing,
                 thresholdSpecification: result.configuration.threshold
             )
         }
@@ -371,6 +400,9 @@ nonisolated enum ClusterStatisticsRunner {
         let channelIndices: [Int]
         let relativeSampleOffsets: [Int]
         let spatialAdjacency: [[Int]]
+        let etacSpatialAdjacencies: [[[Int]]]
+        let resolvedETACRadii: [Double]?
+        let nearestNeighborSpacing: Double?
         let samplingRate: Double
         let measureLabel: String
         let contributingSubjects: [String]
@@ -433,7 +465,12 @@ nonisolated enum ClusterStatisticsRunner {
 
     static func prepare(job: ClusterPermutationJob) throws -> PreparedData {
         guard job.design.isValid else { throw PreparationError.invalidDesign }
-        guard job.adjacency.isValid else { throw PreparationError.invalidAdjacency }
+        // ETAC constructs its own montage-relative distance graphs; the
+        // ordinary single-graph control is irrelevant (and hidden) in that
+        // mode. Without a layout, `build` safely falls back to temporal-only.
+        guard job.inference == .etac || job.adjacency.isValid else {
+            throw PreparationError.invalidAdjacency
+        }
         guard job.windowEndMs > job.windowStartMs else { throw PreparationError.invalidWindow }
 
         let required = job.design.requiredConditions
@@ -543,11 +580,36 @@ nonisolated enum ClusterStatisticsRunner {
             : (0..<channelCount).filter { layoutChannels.contains($0) }
         guard !channels.isEmpty else { throw PreparationError.noChannels }
 
-        let adjacency = ClusterSpatialAdjacency.build(
+        let configuredAdjacency = ClusterSpatialAdjacency.build(
             channelIndices: channels,
             layout: job.sensorLayout,
             configuration: job.adjacency
         )
+        let nearestNeighborSpacing = ClusterSpatialAdjacency.medianNearestNeighborDistance(
+            channelIndices: channels,
+            layout: job.sensorLayout
+        )
+        let resolvedETACRadii: [Double]?
+        let etacAdjacencies: [[[Int]]]
+        if job.inference == .etac, let nearestNeighborSpacing {
+            let radii = job.etac.orderedRadiusMultipliers.map {
+                min($0 * nearestNeighborSpacing, 2.0)
+            }
+            resolvedETACRadii = radii
+            etacAdjacencies = radii.map { radius in
+                ClusterSpatialAdjacency.build(
+                    channelIndices: channels,
+                    layout: job.sensorLayout,
+                    configuration: ClusterAdjacencyConfiguration(method: .distance, distance: radius)
+                )
+            }
+        } else {
+            resolvedETACRadii = nil
+            // Without a sensor layout ETAC still sweeps statistic thresholds,
+            // using the same temporal-only graph as the other corrections.
+            etacAdjacencies = []
+        }
+        let adjacency = etacAdjacencies.last ?? configuredAdjacency
 
         // 5. Flatten, then collapse the within-subject dimension if the design
         //    calls for a subject measure. Each condition is indexed through its
@@ -584,6 +646,9 @@ nonisolated enum ClusterStatisticsRunner {
                 channelIndices: channels,
                 relativeSampleOffsets: relativeOffsets,
                 spatialAdjacency: adjacency,
+                etacSpatialAdjacencies: etacAdjacencies,
+                resolvedETACRadii: resolvedETACRadii,
+                nearestNeighborSpacing: nearestNeighborSpacing,
                 samplingRate: samplingRate,
                 measureLabel: "Condition mean amplitude (µV)",
                 contributingSubjects: contributing,
@@ -616,6 +681,9 @@ nonisolated enum ClusterStatisticsRunner {
             channelIndices: channels,
             relativeSampleOffsets: relativeOffsets,
             spatialAdjacency: adjacency,
+            etacSpatialAdjacencies: etacAdjacencies,
+            resolvedETACRadii: resolvedETACRadii,
+            nearestNeighborSpacing: nearestNeighborSpacing,
             samplingRate: samplingRate,
             measureLabel: "\(measure.label) (µV)",
             contributingSubjects: contributing,

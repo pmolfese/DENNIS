@@ -71,6 +71,7 @@ nonisolated struct SpatiotemporalCluster: Identifiable, Sendable, Equatable {
 nonisolated enum ClusterInferenceMode: String, CaseIterable, Identifiable, Sendable, Equatable {
     case clusterMass = "Cluster mass"
     case tfce = "TFCE"
+    case etac = "ETAC-EEG"
 
     var id: String { rawValue }
 
@@ -80,6 +81,8 @@ nonisolated enum ClusterInferenceMode: String, CaseIterable, Identifiable, Senda
             return "Maris & Oostenveld cluster mass: points passing the cluster-forming threshold are grown into clusters and each cluster's summed statistic is compared against the permutation distribution of the largest cluster."
         case .tfce:
             return "Threshold-free cluster enhancement: every point is scored by integrating cluster extent over all thresholds, removing the arbitrary cluster-forming threshold at the cost of a slower run."
+        case .etac:
+            return "Permutation-calibrated cluster combining: clusters are formed across several uncorrected p thresholds and montage-relative sensor radii, then the equitable union of those subtests is jointly corrected against the permutation null."
         }
     }
 }
@@ -101,6 +104,46 @@ nonisolated struct TFCEParameters: Sendable, Equatable {
         extentExponent >= 0 && extentExponent.isFinite
             && heightExponent >= 0 && heightExponent.isFinite
             && stepCount >= 2 && stepCount <= 500
+    }
+}
+
+/// Parameters for the EEG adaptation of AFNI's Equitable Thresholding and
+/// Clustering (ETAC). Each probability and montage-relative radius combination
+/// becomes a separate clustering subtest. The subtests are placed on a common
+/// marginal-p scale and their minimum p is calibrated against the permutation
+/// distribution of the same minimum, so the final union controls family-wise
+/// error across the channel x time lattice and the full subtest grid.
+///
+nonisolated struct ETACParameters: Sendable, Equatable {
+    /// Uncorrected, two-sided probabilities for t and upper-tail probabilities
+    /// for F. Kept explicit and inspectable rather than generated implicitly.
+    var thresholdProbabilities: [Double] = [0.05, 0.01, 0.005]
+    /// Sensor radii as multiples of the montage's median nearest-neighbor
+    /// spacing. 1.25 follows the immediate local ring on mildly irregular
+    /// layouts; 1.7 sits just inside the second ring of a regular hexagonal
+    /// layout; 2.1 admits a broader neighborhood.
+    var radiusMultipliers: [Double] = [1.25, 1.7, 2.1]
+
+    static let `default` = ETACParameters()
+
+    var isValid: Bool {
+        guard (2...12).contains(thresholdProbabilities.count),
+              thresholdProbabilities.allSatisfy({ $0 > 0 && $0 < 1 && $0.isFinite }),
+              (2...8).contains(radiusMultipliers.count),
+              radiusMultipliers.allSatisfy({ $0 >= 0.5 && $0 <= 4 && $0.isFinite }) else {
+            return false
+        }
+        return Set(thresholdProbabilities).count == thresholdProbabilities.count
+            && Set(radiusMultipliers).count == radiusMultipliers.count
+    }
+
+    /// Stable permissive-to-stringent order for reporting and reproducibility.
+    var orderedProbabilities: [Double] {
+        thresholdProbabilities.sorted(by: >)
+    }
+
+    var orderedRadiusMultipliers: [Double] {
+        radiusMultipliers.sorted()
     }
 }
 

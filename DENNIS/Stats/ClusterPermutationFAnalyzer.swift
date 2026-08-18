@@ -53,6 +53,7 @@ nonisolated enum ClusterPermutationFAnalyzer {
         let channelCount: Int
         let sampleCount: Int
         let spatialAdjacency: [[Int]]
+        let etacSpatialAdjacencies: [[[Int]]]
         let design: Design
 
         init(
@@ -60,12 +61,14 @@ nonisolated enum ClusterPermutationFAnalyzer {
             channelCount: Int,
             sampleCount: Int,
             spatialAdjacency: [[Int]],
+            etacSpatialAdjacencies: [[[Int]]] = [],
             design: Design = .independent
         ) {
             self.levels = levels
             self.channelCount = channelCount
             self.sampleCount = sampleCount
             self.spatialAdjacency = spatialAdjacency
+            self.etacSpatialAdjacencies = etacSpatialAdjacencies
             self.design = design
         }
     }
@@ -75,6 +78,7 @@ nonisolated enum ClusterPermutationFAnalyzer {
         var threshold = ClusterFormingThreshold.statistic(4.0)
         var inference = ClusterInferenceMode.clusterMass
         var tfce = TFCEParameters.default
+        var etac = ETACParameters.default
         var seed: UInt64 = 0xE7A_F1A5_7E57
 
         init(
@@ -82,12 +86,14 @@ nonisolated enum ClusterPermutationFAnalyzer {
             threshold: ClusterFormingThreshold = .statistic(4.0),
             inference: ClusterInferenceMode = .clusterMass,
             tfce: TFCEParameters = .default,
+            etac: ETACParameters = .default,
             seed: UInt64 = 0xE7A_F1A5_7E57
         ) {
             self.permutationCount = permutationCount
             self.threshold = threshold
             self.inference = inference
             self.tfce = tfce
+            self.etac = etac
             self.seed = seed
         }
     }
@@ -106,6 +112,7 @@ nonisolated enum ClusterPermutationFAnalyzer {
         let observedTFCEScores: [Double]?
         let pointPValues: [Double]?
         let resolvedThreshold: Double?
+        let resolvedETACThresholds: [Double]?
         let clusters: [SpatiotemporalCluster]
         let nullMaximumClusterMasses: [Double]
         let rearrangements: ClusterRearrangementPlan
@@ -131,6 +138,7 @@ nonisolated enum ClusterPermutationFAnalyzer {
         guard input.channelCount > 0,
               input.sampleCount > 0,
               input.spatialAdjacency.count == input.channelCount,
+              input.etacSpatialAdjacencies.allSatisfy({ $0.count == input.channelCount }),
               input.levels.allSatisfy({ level in
                   level.units.allSatisfy { $0.count == featureCount }
               }) else { throw AnalysisError.invalidDimensions }
@@ -141,6 +149,15 @@ nonisolated enum ClusterPermutationFAnalyzer {
         guard configuration.permutationCount > 0 else { throw AnalysisError.invalidConfiguration }
         if configuration.inference == .tfce {
             guard configuration.tfce.isValid else { throw AnalysisError.invalidConfiguration }
+        }
+        if configuration.inference == .etac {
+            guard configuration.etac.isValid else { throw AnalysisError.invalidConfiguration }
+            if !input.etacSpatialAdjacencies.isEmpty {
+                guard input.etacSpatialAdjacencies.count
+                        == configuration.etac.radiusMultipliers.count else {
+                    throw AnalysisError.invalidConfiguration
+                }
+            }
         }
 
         let levelCounts = input.levels.map { $0.units.count }
@@ -172,6 +189,22 @@ nonisolated enum ClusterPermutationFAnalyzer {
         } else {
             resolvedThreshold = nil
         }
+        let resolvedETACThresholds: [Double]?
+        if configuration.inference == .etac {
+            let values = configuration.etac.orderedProbabilities.compactMap {
+                resolveThreshold(
+                    .probability($0),
+                    numeratorDegreesOfFreedom: Double(numeratorDF),
+                    denominatorDegreesOfFreedom: Double(denominatorDF)
+                )
+            }
+            guard values.count == configuration.etac.thresholdProbabilities.count else {
+                throw AnalysisError.invalidConfiguration
+            }
+            resolvedETACThresholds = values
+        } else {
+            resolvedETACThresholds = nil
+        }
 
         let plan = ClusterRearrangements.plan(
             rearrangementKind(input: input),
@@ -183,6 +216,13 @@ nonisolated enum ClusterPermutationFAnalyzer {
             sampleCount: input.sampleCount,
             spatialAdjacency: input.spatialAdjacency
         )
+        let etacGrids = input.etacSpatialAdjacencies.map {
+            ClusterGrid(
+                channelCount: input.channelCount,
+                sampleCount: input.sampleCount,
+                spatialAdjacency: $0
+            )
+        }
 
         let observed: [Double]
         let permute: @Sendable (Int, [Int]?, inout SplitMix64, ClusterGrid.Workspace) -> [Double]
@@ -318,10 +358,13 @@ nonisolated enum ClusterPermutationFAnalyzer {
                 threshold: configuration.threshold,
                 inference: configuration.inference,
                 tfce: configuration.tfce,
+                etac: configuration.etac,
                 seed: configuration.seed
             ),
             plan: plan,
             resolvedThreshold: resolvedThreshold,
+            resolvedETACThresholds: resolvedETACThresholds,
+            etacGrids: etacGrids,
             observed: observed,
             signed: false,
             progress: progress,
@@ -342,6 +385,7 @@ nonisolated enum ClusterPermutationFAnalyzer {
             observedTFCEScores: outcome.tfceScores,
             pointPValues: outcome.pointPValues,
             resolvedThreshold: resolvedThreshold,
+            resolvedETACThresholds: resolvedETACThresholds,
             clusters: outcome.clusters,
             nullMaximumClusterMasses: outcome.nullMaxima,
             rearrangements: plan,
