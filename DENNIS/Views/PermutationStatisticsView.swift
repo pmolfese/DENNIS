@@ -560,11 +560,18 @@ struct PermutationStatisticsView: View {
                 inferenceControls
                 labeled("Cluster α", help: Self.alphaHelp) {
                     Picker("", selection: $alpha) {
+                        Text(".001").tag(0.001)
+                        Text(".0025").tag(0.0025)
+                        Text(".005").tag(0.005)
                         Text(".01").tag(0.01)
+                        Text(".025").tag(0.025)
                         Text(".05").tag(0.05)
                         Text(".10").tag(0.10)
                     }
                     .labelsHidden().frame(width: 70)
+                    .onChange(of: alpha) { _, newAlpha in
+                        selectedClusterID = output?.clusters(at: newAlpha).first?.id
+                    }
                 }
                 .help("Corrected p a cluster must beat. Re-filters existing results without another run.")
                 Spacer(minLength: 6)
@@ -1038,7 +1045,7 @@ struct PermutationStatisticsView: View {
 
     @ViewBuilder
     private func results(_ output: ClusterPermutationOutput) -> some View {
-        let significant = output.analysis.clusters.filter { $0.pValue <= alpha }
+        let significant = output.clusters(at: alpha)
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 18) {
                 Text(cellSummary(output.analysis)).font(.subheadline.weight(.semibold))
@@ -1076,7 +1083,7 @@ struct PermutationStatisticsView: View {
                               + "Click any saturated point to select the cluster it belongs to.")
                     ClusterStatisticHeatmap(
                         analysis: output.analysis,
-                        alpha: alpha,
+                        clusters: significant,
                         selectedClusterID: selectedClusterID,
                         onSelectCluster: { selectedClusterID = $0 }
                     )
@@ -1179,6 +1186,7 @@ struct PermutationStatisticsView: View {
                     ClusterTraceChart(
                         output: output,
                         cluster: cluster,
+                        alpha: alpha,
                         showsStandardError: showsStandardError
                     )
                     .frame(minWidth: 460, maxWidth: .infinity)
@@ -1188,6 +1196,7 @@ struct PermutationStatisticsView: View {
                         ClusterTraceChart(
                             output: output,
                             cluster: cluster,
+                            alpha: alpha,
                             showsStandardError: showsStandardError
                         )
                         .frame(width: 640, height: 340)
@@ -1253,7 +1262,7 @@ struct PermutationStatisticsView: View {
     }
 
     private func selectedCluster(in output: ClusterPermutationOutput) -> SpatiotemporalCluster? {
-        let significant = output.analysis.clusters.filter { $0.pValue <= alpha }
+        let significant = output.clusters(at: alpha)
         if let selectedClusterID,
            let match = significant.first(where: { $0.id == selectedClusterID }) {
             return match
@@ -1537,8 +1546,7 @@ struct PermutationStatisticsView: View {
             guard !Task.isCancelled else { return }
             output = response.output
             statusMessage = response.errorMessage
-            selectedClusterID = response.output?.analysis.clusters
-                .first { $0.pValue <= alpha }?.id
+            selectedClusterID = response.output?.clusters(at: alpha).first?.id
             isRunning = false
             analysisTask = nil
         }
@@ -1711,10 +1719,16 @@ extension PermutationStatisticsView {
     """, References.forClusterAdjacency)
 
     static let alphaHelp = help("""
-    The corrected p-value a cluster must beat to be reported as significant. \
-    Applies to the cluster as a whole.
+    The corrected p-value required for display. Under fixed-threshold cluster \
+    mass it applies to the cluster as a whole, so changing alpha can remove a \
+    cluster but cannot shrink its descriptive extent.
 
-    Changing it re-filters the existing results; it does not require another run.
+    TFCE and ETAC provide corrected point support for display; DENNIS regroups \
+    those surviving points at the selected alpha, so their displayed spatial \
+    and temporal extent can shrink at a stricter level.
+
+    Changing it re-filters the existing results; it does not require another run. \
+    An alpha below the reported permutation p-value floor cannot select anything.
     """, References.forClusterInterpretation)
 
     static let epochHelp = help("""
@@ -1746,7 +1760,7 @@ extension PermutationStatisticsView {
 
 private struct ClusterStatisticHeatmap: View {
     let analysis: ClusterPermutationAnalysis
-    let alpha: Double
+    let clusters: [SpatiotemporalCluster]
     let selectedClusterID: Int?
     let onSelectCluster: (Int?) -> Void
 
@@ -1756,8 +1770,8 @@ private struct ClusterStatisticHeatmap: View {
                 let cellWidth = size.width / CGFloat(max(analysis.sampleCount, 1))
                 let cellHeight = size.height / CGFloat(max(analysis.channelCount, 1))
                 let scale = analysis.observedStatistics.map(abs).max() ?? 1
-                let significant = Set(analysis.clusters.filter { $0.pValue <= alpha }.flatMap(\.pointIndices))
-                let selected = Set(analysis.clusters.first { $0.id == selectedClusterID }?.pointIndices ?? [])
+                let significant = Set(clusters.flatMap(\.pointIndices))
+                let selected = Set(clusters.first { $0.id == selectedClusterID }?.pointIndices ?? [])
 
                 for channel in 0..<analysis.channelCount {
                     for sample in 0..<analysis.sampleCount {
@@ -1784,9 +1798,7 @@ private struct ClusterStatisticHeatmap: View {
                     let channel = min(max(Int(value.location.y / max(proxy.size.height, 1) * CGFloat(analysis.channelCount)), 0),
                                       max(analysis.channelCount - 1, 0))
                     let point = channel * analysis.sampleCount + sample
-                    onSelectCluster(analysis.clusters.first {
-                        $0.pValue <= alpha && $0.pointIndices.contains(point)
-                    }?.id)
+                    onSelectCluster(clusters.first { $0.pointIndices.contains(point) }?.id)
                 }
             )
         }
@@ -1824,6 +1836,7 @@ private struct ClusterTracePoint: Identifiable {
 private struct ClusterTraceChart: View {
     let output: ClusterPermutationOutput
     let cluster: SpatiotemporalCluster
+    let alpha: Double
     let showsStandardError: Bool
 
     private let palette: [Color] = [.blue, .red, .green, .orange, .purple, .teal, .brown, .pink]
@@ -1913,7 +1926,7 @@ private struct ClusterTraceChart: View {
 
     private var points: [ClusterTracePoint] {
         output.analysis.seriesNames.flatMap { name -> [ClusterTracePoint] in
-            guard let summary = output.clusterWaveforms[cluster.id]?[name],
+            guard let summary = output.waveforms(at: alpha)[cluster.id]?[name],
                   summary.mean.count == output.analysis.sampleCount,
                   summary.standardError.count == output.analysis.sampleCount else { return [] }
             return (0..<output.analysis.sampleCount).map { sample in

@@ -184,6 +184,12 @@ nonisolated struct ClusterPermutationOutput: Sendable {
     let measureLabel: String
     /// Corrected cluster id -> series name -> across-subject ROI waveform.
     let clusterWaveforms: [Int: [String: ClusterWaveformSummary]]
+    /// Point-wise corrections (TFCE and ETAC) must be regrouped at the alpha
+    /// currently displayed. Grouping once at .10 and merely filtering by a
+    /// component's best p-value would retain overly generous .10 extents at
+    /// stricter alpha levels.
+    let displayClustersByAlpha: [Double: [SpatiotemporalCluster]]
+    let displayWaveformsByAlpha: [Double: [Int: [String: ClusterWaveformSummary]]]
     let contributingSubjects: [String]
     let excludedSubjects: [ClusterExcludedSubject]
     /// Per-subject epoch geometry for the contributing subjects.
@@ -198,6 +204,15 @@ nonisolated struct ClusterPermutationOutput: Sendable {
     var hasMixedBaselines: Bool {
         Set(epochs.map(\.baselineSamples)).count > 1
     }
+
+    func clusters(at alpha: Double) -> [SpatiotemporalCluster] {
+        displayClustersByAlpha[alpha]
+            ?? analysis.clusters.filter { $0.pValue <= alpha }
+    }
+
+    func waveforms(at alpha: Double) -> [Int: [String: ClusterWaveformSummary]] {
+        displayWaveformsByAlpha[alpha] ?? clusterWaveforms
+    }
 }
 
 nonisolated struct ClusterPermutationResponse: Sendable {
@@ -210,6 +225,8 @@ nonisolated struct ClusterPermutationResponse: Sendable {
 // MARK: - Runner
 
 nonisolated enum ClusterStatisticsRunner {
+    static let displayAlphaLevels = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.10]
+
     static func run(
         job: ClusterPermutationJob,
         progress: PCAProgressHandler? = nil
@@ -246,6 +263,30 @@ nonisolated enum ClusterStatisticsRunner {
 
             progress?(0.98, "Summarizing cluster waveforms.")
             let waveforms = waveformSummaries(analysis: analysis, series: prepared.series)
+            let clustersByAlpha: [Double: [SpatiotemporalCluster]] = Dictionary(
+                uniqueKeysWithValues: displayAlphaLevels.map { alpha in
+                    (
+                        alpha,
+                        displayClusters(
+                            analysis: analysis,
+                            spatialAdjacency: prepared.spatialAdjacency,
+                            alpha: alpha
+                        )
+                    )
+                }
+            )
+            let waveformsByAlpha: [Double: [Int: [String: ClusterWaveformSummary]]] = Dictionary(
+                uniqueKeysWithValues: clustersByAlpha.map { alpha, clusters in
+                    (
+                        alpha,
+                        waveformSummaries(
+                            clusters: clusters,
+                            sampleCount: analysis.sampleCount,
+                            series: prepared.series
+                        )
+                    )
+                }
+            )
             progress?(1, "Ready to inspect.")
 
             return ClusterPermutationResponse(
@@ -257,6 +298,8 @@ nonisolated enum ClusterStatisticsRunner {
                     samplingRate: prepared.samplingRate,
                     measureLabel: prepared.measureLabel,
                     clusterWaveforms: waveforms,
+                    displayClustersByAlpha: clustersByAlpha,
+                    displayWaveformsByAlpha: waveformsByAlpha,
                     contributingSubjects: prepared.contributingSubjects,
                     excludedSubjects: prepared.excludedSubjects,
                     epochs: prepared.epochs,
@@ -807,21 +850,90 @@ nonisolated enum ClusterStatisticsRunner {
 
     // MARK: - Waveform summaries
 
+    /// Components shown at one corrected alpha. Fixed-threshold cluster mass
+    /// has cluster-level p-values, so alpha only filters whole clusters. TFCE
+    /// and ETAC expose point p-values and therefore need fresh connected
+    /// components at each alpha; otherwise a single stringent point would make
+    /// its entire .10 display component appear stringent.
+    static func displayClusters(
+        analysis: ClusterPermutationAnalysis,
+        spatialAdjacency: [[Int]],
+        alpha: Double
+    ) -> [SpatiotemporalCluster] {
+        guard analysis.inference != .clusterMass,
+              let pointPValues = analysis.pointPValues,
+              pointPValues.count == analysis.channelCount * analysis.sampleCount else {
+            return analysis.clusters.filter { $0.pValue <= alpha }
+        }
+
+        let scores: [Double]
+        switch analysis.inference {
+        case .clusterMass:
+            return analysis.clusters.filter { $0.pValue <= alpha }
+        case .tfce:
+            guard let tfceScores = analysis.observedTFCEScores else { return [] }
+            scores = tfceScores
+        case .etac:
+            scores = analysis.observedStatistics
+        }
+
+        let grid = ClusterGrid(
+            channelCount: analysis.channelCount,
+            sampleCount: analysis.sampleCount,
+            spatialAdjacency: spatialAdjacency
+        )
+        let candidates = grid.componentsOfSignificantPoints(
+            scores: scores,
+            pValues: pointPValues,
+            alpha: alpha,
+            signed: analysis.statistic == .t,
+            workspace: grid.makeWorkspace()
+        )
+        let clusters = candidates.map { candidate in
+            let mass: Double
+            if analysis.inference == .tfce {
+                mass = candidate.mass
+            } else {
+                mass = candidate.points.reduce(0) { $0 + abs(analysis.observedStatistics[$1]) }
+            }
+            return SpatiotemporalCluster(
+                id: 0,
+                sign: candidate.sign,
+                pointIndices: candidate.points,
+                mass: mass,
+                pValue: candidate.points.map { pointPValues[$0] }.min() ?? 1,
+                startSample: candidate.startSample,
+                endSample: candidate.endSample,
+                channelIndices: candidate.channels
+            )
+        }
+        return ClusterCorrection.sortedForDisplay(clusters)
+    }
+
     private static func waveformSummaries(
         analysis: ClusterPermutationAnalysis,
         series: [PreparedSeries]
     ) -> [Int: [String: ClusterWaveformSummary]] {
+        waveformSummaries(
+            clusters: analysis.clusters.filter { $0.pValue <= 0.10 },
+            sampleCount: analysis.sampleCount,
+            series: series
+        )
+    }
+
+    private static func waveformSummaries(
+        clusters: [SpatiotemporalCluster],
+        sampleCount: Int,
+        series: [PreparedSeries]
+    ) -> [Int: [String: ClusterWaveformSummary]] {
         var summaries: [Int: [String: ClusterWaveformSummary]] = [:]
-        // .10 is the most permissive corrected threshold the UI offers; keeping
-        // summaries for clusters that can never be displayed would retain large
-        // arrays for nothing.
-        for cluster in analysis.clusters where cluster.pValue <= 0.10 {
+        for cluster in clusters {
             var byName: [String: ClusterWaveformSummary] = [:]
             for entry in series {
                 byName[entry.name] = waveformSummary(
                     units: entry.units,
                     channelIndices: cluster.channelIndices,
-                    sampleCount: analysis.sampleCount
+                    sampleCount: sampleCount
                 )
             }
             summaries[cluster.id] = byName

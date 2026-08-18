@@ -148,6 +148,56 @@ struct ClusterStatisticsRunnerTests {
         #expect(summaries[2].meanNeighborCount > summaries[0].meanNeighborCount)
     }
 
+    @Test func pointWiseDisplayComponentsShrinkAtStricterAlpha() throws {
+        let analysis = ClusterPermutationAnalysis(
+            statistic: .t,
+            seriesNames: ["A", "B"],
+            seriesCounts: [10, 10],
+            unitCount: 10,
+            numeratorDegreesOfFreedom: nil,
+            denominatorDegreesOfFreedom: 9,
+            channelCount: 1,
+            sampleCount: 5,
+            observedStatistics: [5, 4, 3, 2, 1],
+            observedTFCEScores: [5, 4, 3, 2, 1],
+            pointPValues: [0.001, 0.005, 0.02, 0.08, 0.2],
+            clusters: [],
+            rearrangements: ClusterRearrangementPlan(
+                count: 999,
+                isExhaustive: false,
+                totalCount: nil,
+                approximateTotal: 1_000_000,
+                arrangements: nil
+            ),
+            inference: .tfce,
+            tfce: .default,
+            etac: .default,
+            resolvedThreshold: nil,
+            resolvedETACThresholds: nil,
+            resolvedETACRadii: nil,
+            etacNearestNeighborSpacing: nil,
+            thresholdSpecification: .probability(0.05)
+        )
+
+        let permissive = try #require(ClusterStatisticsRunner.displayClusters(
+            analysis: analysis,
+            spatialAdjacency: [[]],
+            alpha: 0.10
+        ).first)
+        let stringent = try #require(ClusterStatisticsRunner.displayClusters(
+            analysis: analysis,
+            spatialAdjacency: [[]],
+            alpha: 0.01
+        ).first)
+
+        #expect(permissive.pointIndices == [0, 1, 2, 3])
+        #expect(permissive.startSample == 0)
+        #expect(permissive.endSample == 3)
+        #expect(stringent.pointIndices == [0, 1])
+        #expect(stringent.startSample == 0)
+        #expect(stringent.endSample == 1)
+    }
+
     @Test func aWindowOutsideTheEpochIsRefusedWithTheAvailableRangeAndTheLimitingSubjects() {
         var subjects = (0..<4).map {
             subject(name: "S\($0)", conditions: ["A": (0, 1), "B": (0, 0)])
