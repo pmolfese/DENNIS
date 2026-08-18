@@ -113,6 +113,53 @@ struct PARAFACTests {
         }
     }
 
+    @Test func reconstructsSelectedCPComponentAsDerivedERP() throws {
+        let result = CPResult(
+            factors: [
+                Matrix([[1, 10], [3, 30]]),
+                Matrix([[2, 1], [4, 2]]),
+                Matrix([[5, 1]]),
+                Matrix([[6, 1], [7, 2]])
+            ],
+            weights: [1, 1],
+            modeNames: MultiwayTensor.erp4WayModeNames,
+            dims: [2, 2, 1, 2],
+            rank: 2,
+            fit: 1,
+            iterations: 1,
+            nStarts: 1,
+            bestStartCount: 1,
+            maxCongruence: 0
+        )
+
+        let separate = try #require(DerivedDataBuilder.reconstructedTensorComponents(
+            result: result,
+            modeTypes: [.channel, .time, .condition, .subject],
+            components: [0],
+            channelClusters: [[0], [1]],
+            samplingRate: 250,
+            baselineSamples: 1
+        ))
+        #expect(separate.input.nChannels == 2)
+        #expect(separate.input.nTimes == 2)
+        #expect(separate.input.subjects.count == 2)
+        #expect(separate.input.subjects[0][0][0] == [60, 120])
+        #expect(separate.input.subjects[0][0][1] == [180, 360])
+        #expect(separate.channelIndices == [0, 1])
+
+        let averaged = try #require(DerivedDataBuilder.reconstructedTensorComponents(
+            result: result,
+            modeTypes: [.channel, .time, .condition, .subject],
+            components: [0],
+            channelClusters: [[0, 1]],
+            samplingRate: 250,
+            baselineSamples: 1
+        ))
+        #expect(averaged.input.nChannels == 1)
+        #expect(averaged.input.subjects[0][0][0] == [120, 240])
+        #expect(averaged.channelIndices == nil)
+    }
+
     @Test func emptyTensorThrows() async {
         let zero = MultiwayTensor(dims: [3, 3, 3], data: [Double](repeating: 0, count: 27))
         do {

@@ -9,6 +9,13 @@
 //  orthonormal. The returned CPResult contains a representative average varying
 //  factor, feature loadings, and slice/subject loadings.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Harshman (1972), UCLA Working Papers in Phonetics 22:30-47 — the
+//      PARAFAC2 model.
+//    - Kiers, ten Berge & Bro (1999), J Chemometrics 13(3-4):275-294 — the
+//      direct-fitting algorithm this file implements: orthonormal per-slice
+//      loadings via a shared basis H.
+//
 
 import Foundation
 
@@ -69,15 +76,21 @@ nonisolated enum PARAFAC2 {
         guard r > 0, r <= maxRank else { throw PARAFAC2Error.rankTooLarge(rank: r, max: maxRank) }
 
         let starts = max(options.nStarts, 1)
+        let maxConcurrentStarts = WorkerPool.maxWorkers(for: starts)
         var completed = 0
         var candidates: [StartResult] = []
         await withTaskGroup(of: StartResult.self) { group in
-            for start in 0..<starts {
+            var nextStart = 0
+            func submit(_ start: Int) {
                 group.addTask {
                     var rng = SplitMix64(seed: seed(for: options.seed, start: start))
                     return runStart(start: start, slices: slices, rank: r,
                                     maxIter: options.maxIter, tol: options.tol, rng: &rng)
                 }
+            }
+            while nextStart < min(starts, maxConcurrentStarts) {
+                submit(nextStart)
+                nextStart += 1
             }
 
             for await candidate in group {
@@ -85,6 +98,10 @@ nonisolated enum PARAFAC2 {
                 completed += 1
                 report?(Double(completed) / Double(starts) * 0.96,
                         "PARAFAC2 starts \(completed)/\(starts)")
+                if nextStart < starts {
+                    submit(nextStart)
+                    nextStart += 1
+                }
             }
         }
 

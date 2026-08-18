@@ -86,7 +86,10 @@ final class PCAAnalysisModel {
     // MARK: - Temporal scree
 
     func runScree(members: [Dataset], conditionNames: [String],
-                  timeIndices: [Int]?, mode: PCAMode) {
+                  timeIndices: [Int]?, mode: PCAMode,
+                  decomposition: PCADecomposition,
+                  matrixType: PCAMatrixType, loading: PCALoading,
+                  groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             screeAnalysis = nil
             screeError = "No dimension-consistent loaded data to analyze yet."
@@ -102,14 +105,19 @@ final class PCAAnalysisModel {
             do {
                 report(0.02, "Assembling data tensor")
                 let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
-                result = .success(try Scree.analyze(tensor, mode: mode, report: report))
+                result = .success(try Scree.analyze(
+                    tensor, mode: mode, decomposition: decomposition,
+                    matrixType: matrixType, loading: loading, report: report
+                ))
             } catch {
                 result = .failure(error)
             }
             await MainActor.run {
                 self.screeRunning = false
                 switch result {
-                case .success(let analysis): self.screeAnalysis = analysis
+                case .success(let analysis):
+                    self.screeAnalysis = analysis
+                    store.updatePCACache(for: groupID) { $0.screeAnalysis = analysis }
                 case .failure(let error):
                     self.screeAnalysis = nil
                     self.screeError = (error as? LocalizedError)?.errorDescription
@@ -123,13 +131,18 @@ final class PCAAnalysisModel {
 
     func runTemporalPCA(members: [Dataset], conditionNames: [String],
                         timeIndices: [Int]?, timesMS: [Double],
-                        rotation: PCARotation, requestedFactors: Int) {
+                        rotation: PCARotation, requestedFactors: Int,
+                        decomposition: PCADecomposition,
+                        matrixType: PCAMatrixType, loading: PCALoading,
+                        jackknife: Bool,
+                        groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             pcaModel = nil
             pcaError = "No dimension-consistent loaded data to analyze yet."
             return
         }
         let input = snapshot.input
+        let subjectNames = snapshot.subjects.map(\.name)
         let report = pcaProgress.handler()
         pcaProgress.reset()
         pcaRunning = true
@@ -144,16 +157,38 @@ final class PCAAnalysisModel {
                 let matrix = tensor.reshape(forMode: .temporal)
                 let result = try PCACore.doPCA(
                     matrix, mode: .temporal, rotation: rotation, nFactors: nFactors,
+                    decomposition: decomposition,
+                    matrixType: matrixType, loading: loading,
                     report: report
                 )
-                outcome = .success(TemporalPCAResult(result: result, timesMS: timesMS))
+                let stability: PCAJackknifeResult?
+                if jackknife {
+                    stability = try PCAJackknife.leaveOneSubjectOut(
+                        tensor: tensor,
+                        mode: .temporal,
+                        fullResult: result,
+                        subjectNames: subjectNames,
+                        rotation: rotation,
+                        nFactors: nFactors,
+                        decomposition: decomposition,
+                        matrixType: matrixType,
+                        loading: loading,
+                        report: report,
+                        progressRange: 0.92...1.0
+                    )
+                } else {
+                    stability = nil
+                }
+                outcome = .success(TemporalPCAResult(result: result, timesMS: timesMS, jackknife: stability))
             } catch {
                 outcome = .failure(error)
             }
             await MainActor.run {
                 self.pcaRunning = false
                 switch outcome {
-                case .success(let model): self.pcaModel = model
+                case .success(let model):
+                    self.pcaModel = model
+                    store.updatePCACache(for: groupID) { $0.pcaModel = model }
                 case .failure(let error):
                     self.pcaModel = nil
                     self.pcaError = (error as? LocalizedError)?.errorDescription
@@ -166,7 +201,11 @@ final class PCAAnalysisModel {
     // MARK: - Dual (two-step) PCA
 
     func runSpatialScree(members: [Dataset], conditionNames: [String],
-                         timeIndices: [Int]?, firstRotation: PCARotation, firstFactors: Int) {
+                         timeIndices: [Int]?, firstRotation: PCARotation, firstFactors: Int,
+                         firstDecomposition: PCADecomposition, secondDecomposition: PCADecomposition,
+                         firstMatrixType: PCAMatrixType, firstLoading: PCALoading,
+                         secondMatrixType: PCAMatrixType, secondLoading: PCALoading,
+                         groupID: String, store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
             spatialScree = nil
             spatialScreeError = "No dimension-consistent loaded data to analyze yet."
@@ -184,7 +223,12 @@ final class PCAAnalysisModel {
                 let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
                 let analysis = try Scree.analyzeTwoStep(
                     tensor, firstMode: .temporal, secondMode: .spatial,
-                    firstFactors: firstFactors, firstRotation: firstRotation, report: report
+                    firstFactors: firstFactors, firstRotation: firstRotation,
+                    firstDecomposition: firstDecomposition,
+                    secondDecomposition: secondDecomposition,
+                    firstMatrixType: firstMatrixType, firstLoading: firstLoading,
+                    secondMatrixType: secondMatrixType, secondLoading: secondLoading,
+                    report: report
                 )
                 outcome = .success(analysis)
             } catch {
@@ -193,7 +237,9 @@ final class PCAAnalysisModel {
             await MainActor.run {
                 self.spatialScreeRunning = false
                 switch outcome {
-                case .success(let analysis): self.spatialScree = analysis
+                case .success(let analysis):
+                    self.spatialScree = analysis
+                    store.updatePCACache(for: groupID) { $0.spatialScree = analysis }
                 case .failure(let error):
                     self.spatialScree = nil
                     self.spatialScreeError = (error as? LocalizedError)?.errorDescription
@@ -207,6 +253,11 @@ final class PCAAnalysisModel {
                     timeIndices: [Int]?, timesMS: [Double],
                     firstRotation: PCARotation, secondRotation: PCARotation,
                     firstFactors: Int, spatialFactors: Int,
+                    firstDecomposition: PCADecomposition, secondDecomposition: PCADecomposition,
+                    firstMatrixType: PCAMatrixType, firstLoading: PCALoading,
+                    secondMatrixType: PCAMatrixType, secondLoading: PCALoading,
+                    jackknife: Bool,
+                    factorNames: [String], conditionMetadata: ConditionModeMetadata,
                     sensorLayout: SensorLayout?, groupID: String, groupLabel: String,
                     store: AnalysisStore) {
         guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else {
@@ -229,12 +280,45 @@ final class PCAAnalysisModel {
             do {
                 report(0.02, "Assembling data tensor")
                 let tensor = EPTensor.build(from: input, timeIndices: timeIndices)
-                let result = try TwoStepPCA.run(
+                let baseResult = try TwoStepPCA.run(
                     tensor: tensor, firstMode: .temporal, secondMode: .spatial,
                     firstFactors: firstFactors, secondFactors: spatialFactors,
                     firstRotation: firstRotation, secondRotation: secondRotation,
+                    firstDecomposition: firstDecomposition,
+                    secondDecomposition: secondDecomposition,
+                    firstMatrixType: firstMatrixType, firstLoading: firstLoading,
+                    secondMatrixType: secondMatrixType, secondLoading: secondLoading,
                     firstTimesMS: timesMS, report: report
                 )
+                let result: TwoStepPCAResult
+                if jackknife {
+                    let stability = TwoStepPCA.jackknife(
+                        tensor: tensor,
+                        result: baseResult,
+                        subjectNames: subjectNames,
+                        firstRotation: firstRotation,
+                        secondRotation: secondRotation,
+                        firstDecomposition: firstDecomposition,
+                        secondDecomposition: secondDecomposition,
+                        firstMatrixType: firstMatrixType,
+                        firstLoading: firstLoading,
+                        secondMatrixType: secondMatrixType,
+                        secondLoading: secondLoading,
+                        report: report
+                    )
+                    result = TwoStepPCAResult(
+                        first: baseResult.first,
+                        second: baseResult.second,
+                        firstMode: baseResult.firstMode,
+                        secondMode: baseResult.secondMode,
+                        factors: baseResult.factors,
+                        totalVariance: baseResult.totalVariance,
+                        firstTimesMS: baseResult.firstTimesMS,
+                        jackknife: stability
+                    )
+                } else {
+                    result = baseResult
+                }
                 outcome = .success(result)
             } catch {
                 outcome = .failure(error)
@@ -244,11 +328,21 @@ final class PCAAnalysisModel {
                 switch outcome {
                 case .success(let model):
                     self.dualModel = model
-                    store.dual = AnalysisStore.DualBundle(
+                    let bundle = AnalysisStore.DualBundle(
                         result: model, groupID: groupID, groupLabel: groupLabel,
                         conditionNames: conditionNames, subjectNames: subjectNames,
-                        sensorLayout: sensorLayout, nChannels: nChannels
+                        subjectLevels: snapshot.subjects.map(\.levels),
+                        factorNames: factorNames,
+                        conditionMetadata: conditionMetadata,
+                        sensorLayout: sensorLayout, nChannels: nChannels,
+                        samplingRate: clusterData.samplingRate,
+                        baselineSamples: clusterData.baseline
                     )
+                    store.dual = bundle
+                    store.updatePCACache(for: groupID) {
+                        $0.dualModel = model
+                        $0.dualBundle = bundle
+                    }
                     self.clusterSubjects = clusterData.subjects
                     self.clusterBaseline = clusterData.baseline
                     self.clusterSamplingRate = clusterData.samplingRate

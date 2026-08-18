@@ -7,6 +7,42 @@
 //
 
 import Accelerate
+import Foundation
+
+nonisolated enum WorkerPool {
+    static var maxWorkers: Int {
+        max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
+    }
+
+    static func maxWorkers(for jobCount: Int) -> Int {
+        min(max(1, jobCount), maxWorkers)
+    }
+
+    static func concurrentPerform(iterations: Int, _ body: @escaping @Sendable (Int) -> Void) {
+        guard iterations > 0 else { return }
+        let workerCount = maxWorkers(for: iterations)
+        if workerCount == 1 {
+            for index in 0..<iterations { body(index) }
+            return
+        }
+
+        let lock = NSLock()
+        nonisolated(unsafe) var nextIndex = 0
+        DispatchQueue.concurrentPerform(iterations: workerCount) { _ in
+            while true {
+                lock.lock()
+                guard nextIndex < iterations else {
+                    lock.unlock()
+                    return
+                }
+                let index = nextIndex
+                nextIndex += 1
+                lock.unlock()
+                body(index)
+            }
+        }
+    }
+}
 
 /// Which dimension the PCA treats as variables.
 nonisolated enum PCAMode: String, Sendable {

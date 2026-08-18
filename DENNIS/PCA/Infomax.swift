@@ -7,6 +7,12 @@
 //  `runica` infomax. Used as an oblique "rotation" in the ERP PCA Toolkit
 //  workflow, mirroring mne_erppca.pca.core._infomax_rotation.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Bell & Sejnowski (1995), Neural Comput 7(6):1129-1159 — the
+//      information-maximization algorithm itself.
+//    - Gramfort et al. (2013), Front Neurosci 7:267 — MNE-Python, the source
+//      this Swift port is derived from.
+//
 //  ----------------------------------------------------------------------------
 //  This file is a derivative of MNE-Python, licensed BSD-3-Clause:
 //

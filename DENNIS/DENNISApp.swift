@@ -24,5 +24,10 @@ struct DENNISApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            PreferencesView()
+                .environment(analysis)
+        }
     }
 }

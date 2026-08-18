@@ -9,25 +9,32 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 struct SidebarView: View {
     @Environment(Study.self) private var study
     @Environment(StudyImporter.self) private var importer
+    @Environment(AnalysisStore.self) private var store
     @Binding var selection: SidebarSelection?
 
     /// Called with file/folder URLs dropped onto the sidebar.
     let onDropURLs: ([URL]) -> Void
 
     @State private var isDropTargeted = false
+    @State private var linkingBehavioralItem: AnalysisStore.BehavioralDataItem?
+
+    private var hasSidebarContent: Bool {
+        !study.isEmpty || !store.derivedData.isEmpty || !store.behavioralData.isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             CategoriesBar(selection: $selection)
             Group {
-                if study.isEmpty {
-                    emptyState
-                } else {
+                if hasSidebarContent {
                     tree
+                } else {
+                    emptyState
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -43,6 +50,15 @@ struct SidebarView: View {
                     .padding(4)
             }
         }
+        .sheet(item: $linkingBehavioralItem) { item in
+            BehavioralLinkSheet(
+                item: item,
+                subjectNames: study.datasets.map(\.name),
+                existing: store.behavioralLink(tableID: item.id)
+            ) { link in
+                store.setBehavioralLink(link)
+            }
+        }
     }
 
     private var tree: some View {
@@ -55,6 +71,37 @@ struct SidebarView: View {
             }
             ForEach(study.groupTree()) { node in
                 GroupNodeView(node: node, selection: $selection)
+            }
+            if !store.derivedData.isEmpty {
+                Section("Derived Data") {
+                    ForEach(store.derivedData) { item in
+                        DerivedDataRow(item: item)
+                            .tag(SidebarSelection.derived(item.id))
+                            .contextMenu {
+                                Button {
+                                    saveDerivedData(item)
+                                } label: {
+                                    Label("Save…", systemImage: "square.and.arrow.down")
+                                }
+                            }
+                    }
+                }
+            }
+            if !store.behavioralData.isEmpty {
+                Section("Behavioral Data") {
+                    ForEach(store.behavioralData) { item in
+                        BehavioralDataRow(item: item, link: store.behavioralLink(tableID: item.id))
+                            .tag(SidebarSelection.behavioral(item.id))
+                            .contextMenu {
+                                Button {
+                                    linkingBehavioralItem = item
+                                } label: {
+                                    Label("Link to EEG Study…", systemImage: "link")
+                                }
+                                .disabled(study.datasets.isEmpty)
+                            }
+                    }
+                }
             }
         }
     }
@@ -73,6 +120,169 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+
+    private func saveDerivedData(_ item: AnalysisStore.DerivedDataItem) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(safeFileStem(item.name)).csv"
+        panel.allowedContentTypes = [.commaSeparatedText, .plainText]
+        panel.canCreateDirectories = true
+        panel.accessoryView = exportAccessoryView(item: item)
+
+        guard panel.runModal() == .OK, var url = panel.url else { return }
+        let format = selectedExportFormat(from: panel.accessoryView)
+        let units = selectedExportUnits(from: panel.accessoryView)
+        if url.pathExtension.lowercased() != format.fileExtension {
+            url.deletePathExtension()
+            url.appendPathExtension(format.fileExtension)
+        }
+
+        let snapshot = DerivedDataExporter.Snapshot(item: item)
+        Task.detached(priority: .utility) {
+            do {
+                try DerivedDataExporter.write(snapshot, format: format, units: units, to: url)
+            } catch {
+                await MainActor.run {
+                    _ = NSAlert(error: error).runModal()
+                }
+            }
+        }
+    }
+
+    private func exportAccessoryView(item: AnalysisStore.DerivedDataItem) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let formatRow = NSStackView()
+        formatRow.orientation = .horizontal
+        formatRow.alignment = .centerY
+        formatRow.spacing = 8
+        let label = NSTextField(labelWithString: "Format:")
+        let popup = NSPopUpButton()
+        popup.addItems(withTitles: DerivedDataExporter.Format.allCases.map(\.rawValue))
+        popup.selectItem(withTitle: DerivedDataExporter.Format.csv.rawValue)
+        popup.identifier = NSUserInterfaceItemIdentifier("DerivedDataExportFormat")
+        formatRow.addArrangedSubview(label)
+        formatRow.addArrangedSubview(popup)
+
+        let unitsRow = NSStackView()
+        unitsRow.orientation = .horizontal
+        unitsRow.alignment = .centerY
+        unitsRow.spacing = 8
+        let unitsLabel = NSTextField(labelWithString: "Units:")
+        let unitsPopup = NSPopUpButton()
+        unitsPopup.addItems(withTitles: DerivedDataExporter.Units.allCases.map(\.label))
+        let defaultUnits: DerivedDataExporter.Units = item.nativeUnit == .microvolts || item.microvoltScale != nil ? .microvolts : .native
+        unitsPopup.selectItem(withTitle: defaultUnits.label)
+        unitsPopup.identifier = NSUserInterfaceItemIdentifier("DerivedDataExportUnits")
+        unitsRow.addArrangedSubview(unitsLabel)
+        unitsRow.addArrangedSubview(unitsPopup)
+
+        stack.addArrangedSubview(formatRow)
+        stack.addArrangedSubview(unitsRow)
+        return stack
+    }
+
+    private func selectedExportFormat(from view: NSView?) -> DerivedDataExporter.Format {
+        guard let popup = findFormatPopup(in: view),
+              let title = popup.selectedItem?.title,
+              let format = DerivedDataExporter.Format(rawValue: title) else {
+            return .csv
+        }
+        return format
+    }
+
+    private func selectedExportUnits(from view: NSView?) -> DerivedDataExporter.Units {
+        guard let popup = findUnitsPopup(in: view),
+              let title = popup.selectedItem?.title,
+              let units = DerivedDataExporter.Units.allCases.first(where: { $0.label == title }) else {
+            return .microvolts
+        }
+        return units
+    }
+
+    private func findFormatPopup(in view: NSView?) -> NSPopUpButton? {
+        guard let view else { return nil }
+        if let popup = view as? NSPopUpButton,
+           popup.identifier?.rawValue == "DerivedDataExportFormat" {
+            return popup
+        }
+        for child in view.subviews {
+            if let match = findFormatPopup(in: child) { return match }
+        }
+        return nil
+    }
+
+    private func findUnitsPopup(in view: NSView?) -> NSPopUpButton? {
+        guard let view else { return nil }
+        if let popup = view as? NSPopUpButton,
+           popup.identifier?.rawValue == "DerivedDataExportUnits" {
+            return popup
+        }
+        for child in view.subviews {
+            if let match = findUnitsPopup(in: child) { return match }
+        }
+        return nil
+    }
+
+    private func safeFileStem(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = trimmed.isEmpty ? "derived_data" : trimmed
+        return fallback
+            .replacingOccurrences(of: " ", with: "_")
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-")).inverted)
+            .joined()
+    }
+}
+
+private struct BehavioralDataRow: View {
+    let item: AnalysisStore.BehavioralDataItem
+    let link: AnalysisStore.BehavioralLink?
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        } icon: {
+            Image(systemName: "tablecells")
+                .foregroundStyle(.secondary)
+        }
+        .help(item.sourceURL.lastPathComponent)
+    }
+
+    private var subtitle: String {
+        let base = "\(item.rows.count) rows × \(item.headers.count) columns"
+        guard let link else { return base }
+        return "\(base) · linked \(link.subjectToRow.count)"
+    }
+}
+
+private struct DerivedDataRow: View {
+    let item: AnalysisStore.DerivedDataItem
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .lineLimit(1)
+                Text(item.kind.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        } icon: {
+            Image(systemName: "square.stack.3d.forward.dottedline")
+                .foregroundStyle(.secondary)
+        }
+        .help(item.provenance)
     }
 }
 
@@ -138,6 +348,7 @@ private struct DatasetNodeView: View {
                 }
         }
     }
+
 }
 
 /// A dataset row showing its name and load status.

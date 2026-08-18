@@ -6,6 +6,14 @@
 //  ERP PCA Toolkit / mne_erppca implementation. Varimax uses the Kaiser
 //  pairwise (Jacobi) sweep with random restarts; Promax follows the SAS branch.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Kaiser (1958), Psychometrika 23(3):187-200 — Varimax and the
+//      normalization applied before rotating.
+//    - Hendrickson & White (1964), Br J Stat Psychol 17(1):65-70 — Promax,
+//      run as an oblique refinement of an initial Varimax solution.
+//    - Dien, Beal & Berg (2005), Clin Neurophysiol 116(8):1808-1825 — why
+//      Promax is generally preferred to Varimax for ERP factor structure.
+//
 
 import Foundation
 
@@ -175,7 +183,12 @@ nonisolated enum Rotations {
 }
 
 /// Tiny seedable PRNG so rotation restarts are reproducible.
-nonisolated struct SplitMix64 {
+///
+/// Conforms to `RandomNumberGenerator` so the standard-library helpers
+/// (`Int.random(in:using:)`, `Bool.random(using:)`) can drive the seeded
+/// permutation schemes in `Stats/` from the same generator the rest of the app
+/// uses. `next() -> UInt64` already satisfies the protocol's sole requirement.
+nonisolated struct SplitMix64: RandomNumberGenerator {
     private var state: UInt64
     init(seed: UInt64) { state = seed &+ 0x9E3779B97F4A7C15 }
     mutating func next() -> UInt64 {

@@ -14,6 +14,12 @@
 //  of the interaction. An optional checkbox shades the active temporal-factor
 //  window.
 //
+//  Naming: "cluster" here means a set of channels sharing the sign of a PCA
+//  spatial loading. That is a different concept from the spatiotemporal
+//  statistical clusters in `Stats/` (`SpatiotemporalCluster`, `ClusterGrid`),
+//  which are connected channel × time regions of a test statistic. The two
+//  share the word and nothing else; neither should be renamed to match.
+//
 
 import SwiftUI
 
@@ -68,6 +74,46 @@ struct ClusterERPView: View {
     /// Dimensions offered in the selector: Condition + every between factor.
     private var dimensions: [String] { [Self.conditionDimension] + factorNames }
 
+    private var resolvedCells: [ClusterERPCellBuilder.Cell] {
+        ClusterERPCellBuilder.build(ClusterERPCellBuilder.Input(
+            groupBy: groupBy,
+            conditionDimension: Self.conditionDimension,
+            factorNames: factorNames,
+            subjects: subjects,
+            conditionNames: conditionNames
+        ))
+    }
+
+    private var visibleCellLabels: Set<String> {
+        Set(resolvedCells.lazy.map(\.label).filter(isVisible))
+    }
+
+    private var canExportVoltageMap: Bool {
+        guard PCAVoltageMapBuilder.selectWindow(
+            temporalLoading: temporalLoading,
+            timesMS: timesMS,
+            threshold: store.temporalThreshold
+        ) != nil else { return false }
+        let visible = visibleCellLabels
+        return resolvedCells.contains { cell in
+            visible.contains(cell.label) && cell.subjects.contains { subject in
+                cell.conditions.contains { subject.byCondition[$0]?.isEmpty == false }
+            }
+        }
+    }
+
+    private var voltageExportHelp: String {
+        if visibleCellLabels.isEmpty { return "Select at least one displayed group for the voltage map." }
+        if PCAVoltageMapBuilder.selectWindow(
+            temporalLoading: temporalLoading,
+            timesMS: timesMS,
+            threshold: store.temporalThreshold
+        ) == nil {
+            return "No temporal-factor samples meet the current |TF| threshold."
+        }
+        return "Exports the loading map and observed-voltage map beside the cluster ERPs."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
@@ -92,38 +138,57 @@ struct ClusterERPView: View {
     // MARK: - Controls
 
     private var header: some View {
-        HStack(spacing: 14) {
-            Text("Cluster ERP · \(factor.name)").font(.subheadline.weight(.semibold))
-            Spacer()
-            Toggle("± Std. error", isOn: Binding(
-                get: { store.showStandardError },
-                set: { store.showStandardError = $0 }
-            ))
-            .toggleStyle(.checkbox).font(.caption)
-            Toggle("Highlight temporal window", isOn: Binding(
-                get: { store.highlightTemporalWindow },
-                set: { store.highlightTemporalWindow = $0 }
-            ))
-            .toggleStyle(.checkbox).font(.caption)
-            if store.highlightTemporalWindow {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 14) {
+                Text("Cluster ERP · \(factor.name)").font(.subheadline.weight(.semibold))
+                Spacer()
+                Toggle("± Std. error", isOn: Binding(
+                    get: { store.showStandardError },
+                    set: { store.showStandardError = $0 }
+                ))
+                .toggleStyle(.checkbox).font(.caption)
+                Toggle("Highlight temporal window", isOn: Binding(
+                    get: { store.highlightTemporalWindow },
+                    set: { store.highlightTemporalWindow = $0 }
+                ))
+                .toggleStyle(.checkbox).font(.caption)
                 Text("|TF| ≥").font(.caption).foregroundStyle(.secondary)
                 TextField("0.40", value: Binding(
                     get: { store.temporalThreshold },
                     set: { store.temporalThreshold = max(0, $0) }
                 ), format: .number.precision(.fractionLength(2)))
                     .textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
+                    .help("Defines the temporal-factor window used for shading and the voltage topomap.")
             }
             if let sensorLayout {
-                Toggle("Hide PNG readout", isOn: $hidePNGReadout)
-                    .toggleStyle(.checkbox)
+                HStack(spacing: 12) {
+                    Spacer()
+                    Text("PNG voltage:").font(.caption).foregroundStyle(.secondary)
+                    Picker("PNG voltage", selection: Binding(
+                        get: { store.pcaVoltageSummary },
+                        set: { store.pcaVoltageSummary = $0 }
+                    )) {
+                        ForEach(PCAVoltageSummary.allCases) { summary in
+                            Text(summary.rawValue).tag(summary)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                    .help("Peak maps observed voltage at the temporal-factor peak. Mean averages each sensor over the temporal window.")
+                    Toggle("Hide PNG readout", isOn: $hidePNGReadout)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                    Button {
+                        savePNG(layout: sensorLayout)
+                    } label: {
+                        Label("Save PNG", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderless)
                     .font(.caption)
-                Button {
-                    savePNG(layout: sensorLayout)
-                } label: {
-                    Label("Save PNG", systemImage: "square.and.arrow.down")
+                    .disabled(!canExportVoltageMap)
+                    .help(voltageExportHelp)
                 }
-                .buttonStyle(.borderless)
-                .font(.caption)
             }
         }
     }
@@ -273,11 +338,22 @@ struct ClusterERPView: View {
     private func savePNG(layout: SensorLayout) {
         let visiblePos = posTraces.filter { isVisible($0.id) }
         let visibleNeg = negTraces.filter { isVisible($0.id) }
+        guard let voltageMap = PCAVoltageMapBuilder.build(PCAVoltageMapBuilder.Input(
+            cells: resolvedCells,
+            visibleCellLabels: visibleCellLabels,
+            temporalLoading: temporalLoading,
+            timesMS: timesMS,
+            temporalThreshold: store.temporalThreshold,
+            summary: store.pcaVoltageSummary,
+            samplingRate: samplingRate,
+            baselineSamples: baselineSamples
+        )) else { return }
         ImageExport.savePNG(
             ClusterERPExportView(
                 factor: factor,
                 layout: layout,
                 spatialLoading: spatialLoading,
+                voltageMap: voltageMap,
                 threshold: threshold,
                 positiveChannels: positiveChannels,
                 negativeChannels: negativeChannels,
@@ -301,7 +377,7 @@ struct ClusterERPView: View {
     }
 }
 
-private nonisolated enum ClusterERPTraceBuilder {
+nonisolated enum ClusterERPTraceBuilder {
     struct Input: Sendable {
         let groupBy: Set<String>
         let conditionDimension: String
@@ -326,14 +402,14 @@ private nonisolated enum ClusterERPTraceBuilder {
         let negative: [TraceData]
     }
 
-    private struct Cell: Sendable {
-        let label: String
-        let subjects: [ClusterSubject]
-        let conditions: [String]
-    }
-
     static func build(_ input: Input) -> Result {
-        let built = cells(input)
+        let built = ClusterERPCellBuilder.build(ClusterERPCellBuilder.Input(
+            groupBy: input.groupBy,
+            conditionDimension: input.conditionDimension,
+            factorNames: input.factorNames,
+            subjects: input.subjects,
+            conditionNames: input.conditionNames
+        ))
         return Result(
             cellOrder: built.map(\.label),
             positive: built.enumerated().compactMap {
@@ -345,44 +421,8 @@ private nonisolated enum ClusterERPTraceBuilder {
         )
     }
 
-    /// Build the trace cells from the current "Group by" selection.
-    private static func cells(_ input: Input) -> [Cell] {
-        let orderedBetween = input.factorNames.filter { input.groupBy.contains($0) }
-        let useCondition = input.groupBy.contains(input.conditionDimension)
-
-        var keys: [String] = []
-        var byKey: [String: [ClusterSubject]] = [:]
-        for subject in input.subjects {
-            let key = orderedBetween.map { levelOf(subject, $0, factorNames: input.factorNames) }
-                .joined(separator: "·")
-            if byKey[key] == nil { keys.append(key) }
-            byKey[key, default: []].append(subject)
-        }
-
-        var result: [Cell] = []
-        for key in keys {
-            let subs = byKey[key] ?? []
-            if useCondition {
-                for condition in input.conditionNames {
-                    let label = key.isEmpty ? condition : "\(key)·\(condition)"
-                    result.append(Cell(label: label, subjects: subs, conditions: [condition]))
-                }
-            } else {
-                result.append(Cell(label: key.isEmpty ? "Overall" : key,
-                                   subjects: subs, conditions: input.conditionNames))
-            }
-        }
-        return result
-    }
-
-    private static func levelOf(_ subject: ClusterSubject, _ factorName: String,
-                                factorNames: [String]) -> String {
-        guard let idx = factorNames.firstIndex(of: factorName), idx < subject.levels.count else { return "?" }
-        let value = subject.levels[idx]
-        return value.isEmpty ? "Unassigned" : value
-    }
-
-    private static func makeTrace(_ cell: Cell, index: Int, channels: [Int]) -> TraceData? {
+    private static func makeTrace(_ cell: ClusterERPCellBuilder.Cell, index: Int,
+                                  channels: [Int]) -> TraceData? {
         guard let stats = cellStats(cell: cell, channels: channels) else { return nil }
         return TraceData(label: cell.label, colorIndex: index, mean: stats.mean, se: stats.se, n: stats.n)
     }
@@ -390,7 +430,8 @@ private nonisolated enum ClusterERPTraceBuilder {
     /// Mean and +/-1 standard-error (across subjects) of the cluster-mean waveform.
     /// Each subject contributes one waveform (averaged over the cell's conditions),
     /// so the SE reflects between-subject variability.
-    private static func cellStats(cell: Cell, channels: [Int]) -> (mean: [Float], se: [Float], n: Int)? {
+    private static func cellStats(cell: ClusterERPCellBuilder.Cell,
+                                  channels: [Int]) -> (mean: [Float], se: [Float], n: Int)? {
         var subjectWaves: [[Float]] = []
         for subject in cell.subjects {
             var sum: [Float] = []
@@ -449,6 +490,7 @@ private struct ClusterERPExportView: View {
     let factor: TwoStepFactor
     let layout: SensorLayout
     let spatialLoading: [Double]
+    let voltageMap: PCAVoltageMapBuilder.Result
     let threshold: Double
     let positiveChannels: [Int]
     let negativeChannels: [Int]
@@ -469,6 +511,8 @@ private struct ClusterERPExportView: View {
                         .font(.headline)
                     Text(String(format: "Spatial threshold |loading| ≥ %.2f", threshold))
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("Observed voltage: \(voltageMap.summaryLabel) · \(voltageMap.aggregationLabel)")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text(String(format: "%.1f%% variance", factor.variance * 100))
@@ -476,21 +520,23 @@ private struct ClusterERPExportView: View {
             }
 
             HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Spatial factor topomap")
-                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    TopomapView(
-                        layout: layout,
+                HStack(alignment: .top, spacing: 10) {
+                    exportTopomap(
+                        title: "Factor loading",
+                        subtitle: "Cluster definition · dimensionless",
                         values: spatialLoading,
-                        timeSeconds: 0,
-                        fixedScale: nil,
-                        showsHeader: false,
-                        usesVerticalColorBar: true,
-                        canvasMinHeight: 260,
+                        unitLabel: "loading",
                         highlightThreshold: threshold > 0 ? threshold : nil
                     )
-                    .frame(width: 330, height: 330)
+                    exportTopomap(
+                        title: "Observed voltage",
+                        subtitle: voltageMap.summaryLabel,
+                        values: voltageMap.values,
+                        unitLabel: "µV",
+                        highlightThreshold: nil
+                    )
                 }
+                .frame(width: 550, alignment: .leading)
 
                 VStack(alignment: .leading, spacing: 12) {
                     exportClusterPlot(title: "Positive cluster", channels: positiveChannels,
@@ -501,7 +547,32 @@ private struct ClusterERPExportView: View {
                 .frame(width: 700)
             }
         }
-        .frame(width: 1080, alignment: .leading)
+        .frame(width: 1270, alignment: .leading)
+    }
+
+    private func exportTopomap(title: String, subtitle: String, values: [Double],
+                               unitLabel: String, highlightThreshold: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            TopomapView(
+                layout: layout,
+                values: values,
+                timeSeconds: 0,
+                fixedScale: nil,
+                showsHeader: false,
+                usesVerticalColorBar: true,
+                canvasMinHeight: 210,
+                unitLabel: unitLabel,
+                highlightThreshold: highlightThreshold
+            )
+            .frame(width: 270, height: 290)
+        }
     }
 
     @ViewBuilder
