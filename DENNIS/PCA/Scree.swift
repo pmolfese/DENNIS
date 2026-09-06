@@ -9,6 +9,11 @@
 //  matches the data. Factors above the rescaled random curve are "retained" by
 //  the parallel test; a cumulative-variance threshold gives a second suggestion.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Horn (1965), Psychometrika 30(2):179-185 — parallel analysis itself.
+//    - Dien (2010), J Neurosci Methods 187(1):138-145 — the ERP PCA Toolkit
+//      workflow this is ported from.
+//
 
 import Foundation
 
@@ -26,6 +31,7 @@ nonisolated struct ScreeAnalysis {
     /// Cumulative proportion of variance per factor.
     let cumulativeVariance: [Double]
     let mode: PCAMode
+    let decomposition: PCADecomposition
     let matrixType: PCAMatrixType
     let loading: PCALoading
     let nRandom: Int
@@ -37,6 +43,7 @@ nonisolated enum Scree {
     static func analyze(
         _ tensor: EPTensor,
         mode: PCAMode,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
         nRandom: Int = 1,
@@ -51,6 +58,7 @@ nonisolated enum Scree {
         let dataResult = try PCACore.doPCA(
             tensor.reshape(forMode: mode),
             mode: mode, rotation: .unrotated, nFactors: 1,
+            decomposition: decomposition,
             matrixType: matrixType, loading: loading
         )
         let dataScree = dataResult.scree
@@ -67,13 +75,14 @@ nonisolated enum Scree {
             let lock = NSLock()
             nonisolated(unsafe) var caught: Error?
             nonisolated(unsafe) var completed = 0
-            DispatchQueue.concurrentPerform(iterations: nRandom) { i in
+            WorkerPool.concurrentPerform(iterations: nRandom) { i in
                 var rng = SplitMix64(seed: seed &+ UInt64(i))
                 let randomTensor = EPTensor.randomNormal(dims: dims, rng: &rng)
                 do {
                     let randomResult = try PCACore.doPCA(
                         randomTensor.reshape(forMode: mode),
                         mode: mode, rotation: .unrotated, nFactors: 1,
+                        decomposition: decomposition,
                         matrixType: matrixType, loading: loading
                     )
                     buffer[i] = randomResult.scree
@@ -94,7 +103,7 @@ nonisolated enum Scree {
 
         return fromCurves(
             dataScree: dataScree, randomScree: randomScree,
-            mode: mode, matrixType: matrixType, loading: loading,
+            mode: mode, decomposition: decomposition, matrixType: matrixType, loading: loading,
             nRandom: nRandom, minVariance: minVariance
         )
     }
@@ -110,9 +119,16 @@ nonisolated enum Scree {
         secondMode: PCAMode,
         firstFactors: Int,
         firstRotation: PCARotation = .promax,
+        firstDecomposition: PCADecomposition? = nil,
+        secondDecomposition: PCADecomposition? = nil,
+        decomposition: PCADecomposition = .svd,
         rotopt: Double = 3,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
+        firstMatrixType: PCAMatrixType? = nil,
+        firstLoading: PCALoading? = nil,
+        secondMatrixType: PCAMatrixType? = nil,
+        secondLoading: PCALoading? = nil,
         nRandom: Int = 1,
         minVariance: Double = 0.95,
         seed: UInt64 = 0,
@@ -122,10 +138,18 @@ nonisolated enum Scree {
         precondition(firstMode != secondMode, "two-step modes must differ")
 
         report?(0.1, "First-step \(firstMode.rawValue) PCA")
+        let firstMatrixType = firstMatrixType ?? matrixType
+        let firstLoading = firstLoading ?? loading
+        let secondMatrixType = secondMatrixType ?? matrixType
+        let secondLoading = secondLoading ?? loading
+        let firstDecomposition = firstDecomposition ?? decomposition
+        let secondDecomposition = secondDecomposition ?? decomposition
         let dataScree = try secondStepScreeCurve(
             tensor, firstMode: firstMode, secondMode: secondMode,
             firstFactors: firstFactors, firstRotation: firstRotation, rotopt: rotopt,
-            matrixType: matrixType, loading: loading, seed: seed
+            firstDecomposition: firstDecomposition, secondDecomposition: secondDecomposition,
+            firstMatrixType: firstMatrixType, firstLoading: firstLoading,
+            secondMatrixType: secondMatrixType, secondLoading: secondLoading, seed: seed
         )
 
         let dims = tensor.dims
@@ -137,7 +161,10 @@ nonisolated enum Scree {
             let curve = try secondStepScreeCurve(
                 randomTensor, firstMode: firstMode, secondMode: secondMode,
                 firstFactors: firstFactors, firstRotation: firstRotation, rotopt: rotopt,
-                matrixType: matrixType, loading: loading, seed: seed &+ UInt64(i + 1)
+                firstDecomposition: firstDecomposition, secondDecomposition: secondDecomposition,
+                firstMatrixType: firstMatrixType, firstLoading: firstLoading,
+                secondMatrixType: secondMatrixType, secondLoading: secondLoading,
+                seed: seed &+ UInt64(i + 1)
             )
             for j in 0..<min(accum.count, curve.count) { accum[j] += curve[j] }
         }
@@ -145,7 +172,7 @@ nonisolated enum Scree {
 
         return fromCurves(
             dataScree: dataScree, randomScree: randomScree,
-            mode: secondMode, matrixType: matrixType, loading: loading,
+            mode: secondMode, decomposition: secondDecomposition, matrixType: secondMatrixType, loading: secondLoading,
             nRandom: nRandom, minVariance: minVariance
         )
     }
@@ -159,14 +186,19 @@ nonisolated enum Scree {
         firstFactors: Int,
         firstRotation: PCARotation,
         rotopt: Double,
-        matrixType: PCAMatrixType,
-        loading: PCALoading,
+        firstDecomposition: PCADecomposition,
+        secondDecomposition: PCADecomposition,
+        firstMatrixType: PCAMatrixType,
+        firstLoading: PCALoading,
+        secondMatrixType: PCAMatrixType,
+        secondLoading: PCALoading,
         seed: UInt64
     ) throws -> [Double] {
         let nf1 = min(firstFactors, tensor.variableCount(for: firstMode))
         let first = try PCACore.doPCA(
             tensor.reshape(forMode: firstMode), mode: firstMode, rotation: firstRotation,
-            nFactors: nf1, matrixType: matrixType, loading: loading, rotopt: rotopt, seed: seed
+            nFactors: nf1, decomposition: firstDecomposition,
+            matrixType: firstMatrixType, loading: firstLoading, rotopt: rotopt, seed: seed
         )
         var scoreDims = tensor.dims
         scoreDims[EPTensor.variableAxis(for: firstMode)] = 1
@@ -176,7 +208,8 @@ nonisolated enum Scree {
             let scoreTensor = EPTensor(dims: scoreDims, data: first.scores.column(t))
             let step = try PCACore.doPCA(
                 scoreTensor.reshape(forMode: secondMode), mode: secondMode,
-                rotation: .unrotated, nFactors: 1, matrixType: matrixType, loading: loading
+                rotation: .unrotated, nFactors: 1, decomposition: secondDecomposition,
+                matrixType: secondMatrixType, loading: secondLoading
             )
             if accum.isEmpty { accum = [Double](repeating: 0, count: step.scree.count) }
             for i in 0..<min(accum.count, step.scree.count) { accum[i] += step.scree[i] }
@@ -190,6 +223,7 @@ nonisolated enum Scree {
         dataScree: [Double],
         randomScree: [Double],
         mode: PCAMode,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType,
         loading: PCALoading,
         nRandom: Int,
@@ -212,7 +246,7 @@ nonisolated enum Scree {
             retainedParallel: countAboveThreshold(dataScree, scaled),
             retainedMinVariance: countMinVariance(cumulative, minVariance: minVariance),
             cumulativeVariance: cumulative,
-            mode: mode, matrixType: matrixType, loading: loading, nRandom: nRandom
+            mode: mode, decomposition: decomposition, matrixType: matrixType, loading: loading, nRandom: nRandom
         )
     }
 

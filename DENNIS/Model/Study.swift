@@ -30,6 +30,25 @@ final class DesignFactor: Identifiable {
     init(name: String) { self.name = name }
 }
 
+/// A within-subject factor describing condition cells, e.g. "Stimulus" or
+/// "Congruency". Levels live on each `Condition`, aligned by index.
+@Observable
+final class ConditionFactor: Identifiable {
+    let id = UUID()
+    var name: String
+    init(name: String) { self.name = name }
+}
+
+/// Metadata for the tensor condition mode, aligned to the ordered condition
+/// names used when building the tensor.
+nonisolated struct ConditionModeMetadata: Sendable {
+    let factorNames: [String]
+    /// `[conditionIndex][factorIndex]`.
+    let levelsByCondition: [[String]]
+
+    static let empty = ConditionModeMetadata(factorNames: [], levelsByCondition: [])
+}
+
 /// One within-subject condition (an MFF `<cat>`), e.g. "ba+".
 @Observable
 final class Condition: Identifiable {
@@ -40,12 +59,17 @@ final class Condition: Identifiable {
     var sampleCount: Int
     /// Stimulus-onset sample index (pre-stimulus baseline length).
     var baselineSamples: Int
+    /// Within-subject factor levels, aligned by index with
+    /// `Study.conditionFactors`.
+    var levels: [String]
 
-    init(name: String, samples: [[Float]]? = nil, sampleCount: Int = 0, baselineSamples: Int = 0) {
+    init(name: String, samples: [[Float]]? = nil, sampleCount: Int = 0,
+         baselineSamples: Int = 0, levels: [String] = []) {
         self.name = name
         self.samples = samples
         self.sampleCount = sampleCount
         self.baselineSamples = baselineSamples
+        self.levels = levels
     }
 }
 
@@ -100,6 +124,7 @@ struct GroupNode: Identifiable {
 final class Study {
     var name: String
     var factors: [DesignFactor]
+    var conditionFactors: [ConditionFactor]
     var datasets: [Dataset]
 
     private var derivedRevision = 0
@@ -117,6 +142,15 @@ final class Study {
     init(name: String = "Untitled Study", factors: [DesignFactor] = [], datasets: [Dataset] = []) {
         self.name = name
         self.factors = factors
+        self.conditionFactors = []
+        self.datasets = datasets
+    }
+
+    init(name: String, factors: [DesignFactor],
+         conditionFactors: [ConditionFactor], datasets: [Dataset]) {
+        self.name = name
+        self.factors = factors
+        self.conditionFactors = conditionFactors
         self.datasets = datasets
     }
 
@@ -145,6 +179,30 @@ final class Study {
         invalidateDerivedCache()
     }
 
+    /// Replace the between-subject design without touching loaded signal data.
+    /// This is the commit point for the design editor: factor names define the
+    /// sidebar nesting order, and each dataset's levels place it in that tree.
+    @MainActor
+    func applyDesignAssignment(factorNames: [String], levelsByDatasetID: [UUID: [String]]) {
+        let cleanedNames = factorNames.enumerated().map { index, name in
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Factor \(index + 1)" : trimmed
+        }
+        factors = cleanedNames.map(DesignFactor.init(name:))
+        for dataset in datasets {
+            let sourceLevels = levelsByDatasetID[dataset.id] ?? dataset.levels
+            dataset.levels = normalizedLevels(sourceLevels, count: cleanedNames.count)
+        }
+        invalidateDerivedCache()
+    }
+
+    @MainActor
+    func applyDesignAssignment(_ plan: DesignAssignmentPlan) {
+        plan.normalizeWidths()
+        let levels = Dictionary(uniqueKeysWithValues: plan.rows.map { ($0.datasetID, $0.levels) })
+        applyDesignAssignment(factorNames: plan.factorNames, levelsByDatasetID: levels)
+    }
+
     // MARK: - Conditions (categories)
 
     /// The union of all condition (category) names across every dataset, in
@@ -169,6 +227,84 @@ final class Study {
         }
         invalidateDerivedCache()
         return removedIDs
+    }
+
+    // MARK: - Within-subject condition metadata
+
+    @discardableResult
+    func ensureConditionFactors(count: Int) -> [ConditionFactor] {
+        var changed = false
+        while conditionFactors.count < count {
+            conditionFactors.append(ConditionFactor(name: "Condition Factor \(conditionFactors.count + 1)"))
+            changed = true
+        }
+        if changed { normalizeConditionLevelWidths(); invalidateDerivedCache() }
+        return conditionFactors
+    }
+
+    func addConditionFactor(defaultsToConditionNames: Bool = false) {
+        let index = conditionFactors.count
+        conditionFactors.append(ConditionFactor(name: index == 0 ? "Condition" : "Condition Factor \(index + 1)"))
+        for dataset in datasets {
+            for condition in dataset.conditions {
+                while condition.levels.count < index { condition.levels.append("") }
+                condition.levels.append(defaultsToConditionNames ? condition.name : "")
+            }
+        }
+        invalidateDerivedCache()
+    }
+
+    func removeConditionFactor(at index: Int) {
+        guard conditionFactors.indices.contains(index) else { return }
+        conditionFactors.remove(at: index)
+        for dataset in datasets {
+            for condition in dataset.conditions where index < condition.levels.count {
+                condition.levels.remove(at: index)
+            }
+        }
+        invalidateDerivedCache()
+    }
+
+    func conditionLevel(conditionName: String, factorIndex: Int) -> String {
+        guard factorIndex >= 0 else { return "" }
+        for dataset in datasets {
+            if let condition = dataset.conditions.first(where: { $0.name == conditionName }),
+               factorIndex < condition.levels.count {
+                return condition.levels[factorIndex]
+            }
+        }
+        return ""
+    }
+
+    func setConditionLevel(conditionName: String, factorIndex: Int, level: String) {
+        guard factorIndex >= 0 else { return }
+        ensureConditionFactors(count: factorIndex + 1)
+        for dataset in datasets {
+            for condition in dataset.conditions where condition.name == conditionName {
+                while condition.levels.count <= factorIndex { condition.levels.append("") }
+                condition.levels[factorIndex] = level
+            }
+        }
+        invalidateDerivedCache()
+    }
+
+    func conditionMetadata(for conditionNames: [String]) -> ConditionModeMetadata {
+        guard !conditionFactors.isEmpty else { return .empty }
+        let factorNames = conditionFactors.map(\.name)
+        let levels = conditionNames.map { name in
+            (0..<factorNames.count).map { conditionLevel(conditionName: name, factorIndex: $0) }
+        }
+        return ConditionModeMetadata(factorNames: factorNames, levelsByCondition: levels)
+    }
+
+    private func normalizeConditionLevelWidths() {
+        let count = conditionFactors.count
+        for dataset in datasets {
+            for condition in dataset.conditions {
+                while condition.levels.count < count { condition.levels.append("") }
+                if condition.levels.count > count { condition.levels.removeLast(condition.levels.count - count) }
+            }
+        }
     }
 
     // MARK: - Derived grouping tree
@@ -321,6 +457,12 @@ final class Study {
         groupMembersCache.removeAll(keepingCapacity: true)
         childGroupsCache.removeAll(keepingCapacity: true)
         sharedConditionsCache.removeAll(keepingCapacity: true)
+    }
+
+    private func normalizedLevels(_ levels: [String], count: Int) -> [String] {
+        if levels.count == count { return levels }
+        if levels.count > count { return Array(levels.prefix(count)) }
+        return levels + Array(repeating: "", count: count - levels.count)
     }
 
     private func buildNodes(datasets: [Dataset], depth: Int, pathPrefix: String) -> [GroupNode] {

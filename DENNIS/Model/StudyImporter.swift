@@ -231,10 +231,10 @@ final class StudyImporter {
     ) -> [RawCandidate] {
         guard !packages.isEmpty else { return [] }
 
-        var output = Array<RawCandidate?>(repeating: nil, count: packages.count)
+        nonisolated(unsafe) var output = Array<RawCandidate?>(repeating: nil, count: packages.count)
         let lock = NSLock()
 
-        DispatchQueue.concurrentPerform(iterations: packages.count) { index in
+        WorkerPool.concurrentPerform(iterations: packages.count) { index in
             let url = packages[index]
             let levels = levelsByURL[url] ?? []
             let candidate: RawCandidate

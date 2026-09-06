@@ -130,6 +130,44 @@ nonisolated struct EPTensor {
         return out
     }
 
+    /// Return a tensor containing only the requested subject indices, preserving
+    /// their order. Subject is axis 3 in the EP layout.
+    func selectingSubjects(_ indices: [Int]) -> EPTensor {
+        let valid = indices.filter { (0..<nSubjects).contains($0) }
+        var newDims = dims
+        newDims[3] = valid.count
+        var out = EPTensor(dims: newDims)
+        let srcStrides = EPTensor.fortranStrides(dims)
+        let dstStrides = EPTensor.fortranStrides(newDims)
+
+        for (newSubject, oldSubject) in valid.enumerated() {
+            for relation in 0..<nRelations {
+                for freq in 0..<nFreqs {
+                    for cell in 0..<nCells {
+                        for time in 0..<nTimes {
+                            for channel in 0..<nChannels {
+                                let src = channel * srcStrides[0]
+                                    + time * srcStrides[1]
+                                    + cell * srcStrides[2]
+                                    + oldSubject * srcStrides[3]
+                                    + freq * srcStrides[5]
+                                    + relation * srcStrides[6]
+                                let dst = channel * dstStrides[0]
+                                    + time * dstStrides[1]
+                                    + cell * dstStrides[2]
+                                    + newSubject * dstStrides[3]
+                                    + freq * dstStrides[5]
+                                    + relation * dstStrides[6]
+                                out.data[dst] = data[src]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     // MARK: - Builders
 
     /// Build an EP tensor from a group of datasets and an ordered list of shared

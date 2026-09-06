@@ -27,7 +27,13 @@ struct CSVExportTests {
             result: result, groupID: "g", groupLabel: "Group",
             conditionNames: (0..<cells).map { "c\($0)" },
             subjectNames: (0..<subjects).map { "s\($0)" },
-            sensorLayout: nil, nChannels: channels
+            subjectLevels: (0..<subjects).map { _ in [] },
+            factorNames: [],
+            conditionMetadata: .empty,
+            sensorLayout: nil,
+            nChannels: channels,
+            samplingRate: 250,
+            baselineSamples: 0
         )
     }
 

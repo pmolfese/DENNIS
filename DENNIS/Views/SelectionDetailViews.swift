@@ -109,15 +109,43 @@ struct DatasetDetail: View {
                     }
                 }
             }
-            Section("Conditions") {
+            Section {
                 ForEach(dataset.conditions) { condition in
-                    LabeledContent(condition.name,
-                                   value: condition.sampleCount > 0 ? "\(condition.sampleCount) samples" : "—")
+                    LabeledContent(condition.name) {
+                        Text(epochDescription(condition))
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Conditions")
+            } footer: {
+                if dataset.conditions.contains(where: { $0.sampleCount > 0 && $0.baselineSamples == 0 }) {
+                    Text("A 0 ms pre-stimulus interval means the file's categories carried no stimulus-onset event, "
+                         + "so the epoch is timed from its own start. Analyses that position a window relative to "
+                         + "onset will treat sample 0 as onset for those conditions.")
+                        .font(.caption)
                 }
             }
         }
         .formStyle(.grouped)
         .navigationTitle(dataset.name)
+    }
+
+    /// Epoch geometry in the terms an analysis window is specified in: the
+    /// pre-stimulus interval and the stimulus-relative span the epoch covers.
+    private func epochDescription(_ condition: Condition) -> String {
+        guard condition.sampleCount > 0 else { return "—" }
+        guard dataset.samplingRate > 0 else {
+            return "\(condition.sampleCount) samples · \(condition.baselineSamples) pre-stimulus"
+        }
+        let start = Double(-condition.baselineSamples) / dataset.samplingRate * 1_000
+        let end = Double(condition.sampleCount - 1 - condition.baselineSamples) / dataset.samplingRate * 1_000
+        let baselineMs = Double(condition.baselineSamples) / dataset.samplingRate * 1_000
+        return String(
+            format: "%d samples · %.0f ms pre-stimulus (%d) · %.0f to %.0f ms",
+            condition.sampleCount, baselineMs, condition.baselineSamples, start, end
+        )
     }
 
     private var statusText: String {

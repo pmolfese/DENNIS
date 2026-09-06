@@ -109,6 +109,13 @@ struct PLSView: View {
                 }
                 .fixedSize()
                 HelpButton(text: Self.methodHelp)
+                Spacer()
+                ReferencesButton(
+                    title: "PLS References",
+                    intro: "The methods this mode implements: mean-centered (task) PLS as an SVD of "
+                        + "a design-by-brain-data cross-covariance, with permutation and bootstrap resampling.",
+                    references: References.forPLS
+                )
             }
             Text(method.blurb).font(.callout).foregroundStyle(.secondary)
 
@@ -612,6 +619,8 @@ struct PLSView: View {
 
     Each LV has a singular value (effect size), a brain salience (the pattern), \
     and a design salience (how each condition/group/measure weights onto it).
+
+    \(References.shortList(References.forPLS))
     """
 
     private static let meanCenteringHelp = """
@@ -633,6 +642,8 @@ struct PLSView: View {
     reshuffled many times and the decomposition re-run; an LV's p-value is the \
     fraction of permutations whose singular value meets or exceeds the observed \
     one. 500–1000 iterations is typical. Runs in parallel across CPU cores.
+
+    \(References.shortList(References.forPLS))
     """
 
     private static let bootstrapHelp = """
@@ -640,6 +651,8 @@ struct PLSView: View {
     resampled with replacement many times; the bootstrap ratio is the salience \
     divided by its bootstrap standard error (like a z-score). |ratio| > ~2 (≈95%) \
     or > ~3 marks stable features. Runs in parallel across CPU cores.
+
+    \(References.shortList(References.forPLS))
     """
 
     private static let measureSelectHelp = """

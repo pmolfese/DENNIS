@@ -18,10 +18,15 @@ nonisolated enum TensorAlgorithm: String, CaseIterable {
     case parafac = "PARAFAC"
     case parafac2 = "PARAFAC2"
 }
+enum TensorViewDataSource: Hashable {
+    case group(String)
+    case derived(UUID)
+}
 
 struct TensorView: View {
     @Environment(Study.self) private var study
-    let groupID: String
+    @Environment(AnalysisStore.self) private var store
+    let dataSource: TensorViewDataSource
 
     @State private var source: TensorSource = .erp
     /// Pool conditions (drop the condition mode) → channels × time × subject etc.
@@ -87,12 +92,23 @@ struct TensorView: View {
     @State private var diagnosticsError: String?
     @State private var exportError: String?
 
-    private var members: [Dataset] { study.datasets(inGroupID: groupID) }
-    private var conditionNames: [String] { study.sharedConditionNames(inGroupID: groupID) }
-    private var loadedCount: Int { members.filter { $0.loadState == .loaded }.count }
+    private var groupID: String? {
+        if case .group(let id) = dataSource { id } else { nil }
+    }
+    private var derivedItem: AnalysisStore.DerivedDataItem? {
+        if case .derived(let id) = dataSource { store.derivedItem(id: id) } else { nil }
+    }
+    private var members: [Dataset] { groupID.map { study.datasets(inGroupID: $0) } ?? [] }
+    private var conditionNames: [String] { derivedItem?.conditionNames ?? groupID.map { study.sharedConditionNames(inGroupID: $0) } ?? [] }
+    private var conditionMetadata: ConditionModeMetadata { derivedItem?.conditionMetadata ?? study.conditionMetadata(for: conditionNames) }
+    private var factorNames: [String] { derivedItem?.factorNames ?? study.factors.map(\.name) }
+    private var subjectNames: [String] { derivedItem?.subjectNames ?? members.map(\.name) }
+    private var loadedCount: Int { derivedItem?.subjectNames.count ?? members.filter { $0.loadState == .loaded }.count }
     private var groupSensorLayout: SensorLayout? { members.compactMap(\.sensorLayout).first }
     private var title: String {
-        groupID.isEmpty ? study.name : (groupID.split(separator: "/").last.map(String.init) ?? groupID)
+        if let item = derivedItem { return item.name }
+        let groupID = groupID ?? ""
+        return groupID.isEmpty ? study.name : (groupID.split(separator: "/").last.map(String.init) ?? groupID)
     }
 
     var body: some View {
@@ -113,6 +129,10 @@ struct TensorView: View {
                 }
                 Divider()
                 if source == .erp { erpPreprocessingSection } else { tfSection }
+                if source == .erp, derivedItem == nil, !conditionNames.isEmpty {
+                    Divider()
+                    conditionMetadataSection
+                }
                 Divider()
                 diagnosticsSection
                 Divider()
@@ -135,19 +155,28 @@ struct TensorView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("\(title) · tensor").font(.largeTitle.bold())
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(title) · tensor").font(.largeTitle.bold())
+                Spacer()
+                ReferencesButton(
+                    title: "Tensor References",
+                    intro: "The multiway decomposition this mode implements: PARAFAC for a fixed "
+                        + "loading per mode, PARAFAC2 when one mode is allowed to vary in shape by slice.",
+                    references: References.forTensor
+                )
+            }
             if let summary = dimsSummary { Text(summary).font(.callout.monospacedDigit()).foregroundStyle(.secondary) }
         }
     }
 
     private var dimsSummary: String? {
-        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
-        let input = snapshot.input
+        guard let input = sourceInput else { return nil }
         let nTimes = currentTimeAxis()?.indices.count ?? input.nTimes
         let nCond = poolConditions ? 1 : input.conditionCount
-        let nSubj = snapshot.subjects.count
+        let nSubj = subjectNames.count
         let elements = input.nChannels * nTimes * nCond * nSubj
-        return "\(input.nChannels) ch × \(nTimes) time × \(nCond) cond × \(nSubj) subj"
+        let prefix = derivedItem == nil ? "" : "derived · "
+        return "\(prefix)\(input.nChannels) ch × \(nTimes) time × \(nCond) cond × \(nSubj) subj"
             + "  ·  \(elements.formatted()) elements"
     }
 
@@ -172,6 +201,72 @@ struct TensorView: View {
                 Text("–").foregroundStyle(.secondary)
                 TextField("post", value: $trimPost, format: .number).frame(width: 60).textFieldStyle(.roundedBorder)
                 Stepper("Downsample ×\(downsample)", value: $downsample, in: 1...16).fixedSize()
+            }
+        }
+        .font(.callout)
+    }
+
+    // MARK: - Within-subject condition metadata
+
+    private var conditionMetadataSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("Condition metadata").font(.headline)
+                HelpButton(text: "Defines within-subject factor levels for each condition cell. "
+                           + "PARAFAC still has one condition mode; these labels let reconstruction "
+                           + "scale a component by the mean loading for a selected condition-factor level.")
+                Spacer()
+                Button {
+                    study.addConditionFactor(defaultsToConditionNames: study.conditionFactors.isEmpty)
+                } label: {
+                    Label("Add Factor", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if study.conditionFactors.isEmpty {
+                Text("Add a condition factor to label condition cells as within-subject levels.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("Cell").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .frame(width: 150, alignment: .leading)
+                        ForEach(study.conditionFactors.indices, id: \.self) { index in
+                            HStack(spacing: 3) {
+                                TextField("Factor \(index + 1)", text: conditionFactorNameBinding(index))
+                                    .textFieldStyle(.roundedBorder)
+                                if study.conditionFactors.count > 1 {
+                                    Button {
+                                        study.removeConditionFactor(at: index)
+                                    } label: {
+                                        Image(systemName: "minus.circle.fill")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(width: 145, alignment: .leading)
+                        }
+                    }
+                    .font(.caption)
+
+                    ForEach(conditionNames, id: \.self) { condition in
+                        HStack(spacing: 8) {
+                            Text(condition)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .frame(width: 150, alignment: .leading)
+                            ForEach(study.conditionFactors.indices, id: \.self) { factorIndex in
+                                TextField("Level", text: conditionLevelBinding(condition: condition, factorIndex: factorIndex))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 145)
+                            }
+                        }
+                    }
+                }
             }
         }
         .font(.callout)
@@ -259,7 +354,7 @@ struct TensorView: View {
                 Text("Per-mode scree").font(.headline)
                 HelpButton(text: "The singular spectrum of each mode (the multilinear SVD). Parallel "
                            + "analysis compares each mode against random tensors of the same shape; the "
-                           + "smallest per-mode count above the noise floor is the recommended rank.")
+                           + "smallest per-mode count above the noise floor is the recommended rank.\n\n" + References.shortList(References.forScree))
                 Spacer()
                 Toggle("Parallel analysis", isOn: $parallelAnalysis).toggleStyle(.checkbox).font(.caption)
                 if parallelAnalysis {
@@ -348,7 +443,7 @@ struct TensorView: View {
                 HelpButton(text: "PARAFAC estimates one loading per mode. PARAFAC2 slices by subject "
                            + "and allows the time mode to vary by subject, which can capture ERP latency "
                            + "or waveform-shape differences. In PARAFAC2, non-time modes are folded into "
-                           + "one feature mode and CORCONDIA is not reported.")
+                           + "one feature mode and CORCONDIA is not reported.\n\n" + References.shortList(References.forTensor))
                 Spacer()
                 Picker("Algorithm", selection: $algorithm) {
                     ForEach(TensorAlgorithm.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -374,8 +469,11 @@ struct TensorView: View {
                 CPExplorerView(
                     result: result, modeTypes: cpModeTypes, layout: groupSensorLayout,
                     timesMS: cpTimesMS, freqs: cpFreqs, conditionNames: conditionNames,
-                    subjectLevels: subjectLevels(), factorNames: study.factors.map(\.name),
-                    coreConsistency: cpCoreConsistency)
+                    subjectLevels: subjectLevels(), factorNames: factorNames,
+                    conditionMetadata: conditionMetadata,
+                    coreConsistency: cpCoreConsistency,
+                    observedContext: cpObservedContext(),
+                    onSendToDecoding: tensorSendHandler(result))
             } else {
                 Text("Run the diagnostics first to get a recommended rank, then decompose.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -386,16 +484,16 @@ struct TensorView: View {
     // MARK: - Export
 
     private func exportSection(_ result: CPResult) -> some View {
-        let names = EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.name) ?? []
+        let names = subjectNames
         let levels = subjectLevels()
-        let factorNames = study.factors.map(\.name)
+        let sourceFactorNames = factorNames
         return VStack(alignment: .leading, spacing: 8) {
             Text("Export Loadings").font(.headline)
             HStack(spacing: 12) {
                 if let m = cpModeTypes.firstIndex(of: .subject) {
                     Button {
                         save(CPCSVBuilders.subjectLoadings(result, subjectMode: m, subjectNames: names,
-                                                           subjectLevels: levels, factorNames: factorNames),
+                                                           subjectLevels: levels, factorNames: sourceFactorNames),
                              name: "\(safe(title))_cp_subject_loadings")
                     } label: { Label("Subject", systemImage: "person.3") }
                         .help("One row per subject with design columns and a component per column — for ANOVA / mixed models.")
@@ -435,12 +533,135 @@ struct TensorView: View {
     // MARK: - Shared helpers
 
     private func subjectLevels() -> [[String]] {
-        EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.levels) ?? []
+        if let item = derivedItem { return item.subjectLevels }
+        return EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.levels) ?? []
+    }
+
+    private func contributingSubjectNames() -> [String] {
+        if let item = derivedItem { return item.subjectNames }
+        return EPTensor.snapshot(datasets: members, conditionNames: conditionNames)?.subjects.map(\.name) ?? []
+    }
+
+    private func tensorSendHandler(_ result: CPResult) -> ((CPTensorDecodingRequest) -> Void)? {
+        guard source == .erp,
+              algorithm == .parafac,
+              cpModeTypes.contains(.channel),
+              cpModeTypes.contains(.time),
+              cpModeTypes.contains(.subject) else { return nil }
+        return { request in
+            sendTensorToDecoding(result: result, request: request)
+        }
+    }
+
+    private func sendTensorToDecoding(result: CPResult, request: CPTensorDecodingRequest) {
+        guard let input = sourceInput,
+              let channelMode = cpModeTypes.firstIndex(of: .channel) else { return }
+        let components = request.componentScope == .selected
+            ? [request.selectedComponent]
+            : Array(0..<result.rank)
+        let clusters: [[Int]]
+        switch request.output {
+        case .includedChannels:
+            clusters = (0..<result.factors[channelMode].rows).map { [$0] }
+        case .clusterAverages:
+            clusters = [request.positiveChannels, request.negativeChannels].filter { !$0.isEmpty }
+        }
+        guard !clusters.isEmpty else { return }
+
+        let hasConditionMode = cpModeTypes.contains(.condition)
+        let outputConditionNames = hasConditionMode ? conditionNames : ["Pooled"]
+        let outputConditionMetadata = hasConditionMode ? conditionMetadata : .empty
+        let timing = tensorDerivedTiming(sourceInput: input)
+        let unit: AnalysisStore.DerivedDataItem.Unit
+        if scaleChannels {
+            unit = .component
+        } else {
+            unit = derivedItem?.nativeUnit ?? .microvolts
+        }
+        var preprocessing: [String] = []
+        if centerSubjects { preprocessing.append("subject-centered") }
+        if centerTime { preprocessing.append("time-centered") }
+        if scaleChannels { preprocessing.append("channel RMS-scaled") }
+        if preprocessing.isEmpty { preprocessing.append("no amplitude preprocessing") }
+        if poolConditions { preprocessing.append("conditions pooled") }
+        let thresholdText = request.output == .clusterAverages
+            ? ", footprint |loading| ≥ \(String(format: "%.3g", request.loadingThreshold))"
+            : ""
+
+        _ = store.addReconstructedTensorDerivedData(
+            result: result,
+            modeTypes: cpModeTypes,
+            components: components,
+            channelClusters: clusters,
+            componentScope: request.componentScope,
+            output: request.output,
+            sourceGroupID: derivedItem?.sourceGroupID ?? groupID ?? "",
+            sourceGroupLabel: title,
+            conditionNames: outputConditionNames,
+            subjectNames: contributingSubjectNames(),
+            subjectLevels: subjectLevels(),
+            factorNames: factorNames,
+            conditionMetadata: outputConditionMetadata,
+            samplingRate: timing.samplingRate,
+            baselineSamples: timing.baselineSamples,
+            nativeUnit: unit,
+            preprocessingDescription: preprocessing.joined(separator: ", ") + thresholdText
+        )
+    }
+
+    private func tensorDerivedTiming(sourceInput: EPTensor.Input) -> (samplingRate: Double, baselineSamples: Int) {
+        guard cpTimesMS.count > 1 else {
+            return (sourceInput.samplingRate, min(sourceInput.baselineSamples, max(cpTimesMS.count - 1, 0)))
+        }
+        let deltas = zip(cpTimesMS.dropFirst(), cpTimesMS).map { abs($0 - $1) }.filter { $0 > 0 }
+        guard !deltas.isEmpty else {
+            return (sourceInput.samplingRate, min(sourceInput.baselineSamples, cpTimesMS.count))
+        }
+        let stepMS = deltas.sorted()[deltas.count / 2]
+        let rate = stepMS > 0 ? 1000 / stepMS : sourceInput.samplingRate
+        let baseline = Int((-cpTimesMS[0] / stepMS).rounded())
+        return (rate, min(max(baseline, 0), cpTimesMS.count))
+    }
+
+    private var sourceInput: EPTensor.Input? {
+        if let item = derivedItem { return item.input }
+        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
+        return snapshot.input
+    }
+
+    private func conditionFactorNameBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                index < study.conditionFactors.count ? study.conditionFactors[index].name : ""
+            },
+            set: {
+                if index < study.conditionFactors.count { study.conditionFactors[index].name = $0 }
+            }
+        )
+    }
+
+    private func conditionLevelBinding(condition: String, factorIndex: Int) -> Binding<String> {
+        Binding(
+            get: { study.conditionLevel(conditionName: condition, factorIndex: factorIndex) },
+            set: { study.setConditionLevel(conditionName: condition, factorIndex: factorIndex, level: $0) }
+        )
+    }
+
+    private func cpObservedContext() -> CPObservedContext? {
+        guard source == .erp,
+              derivedItem == nil,
+              let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
+        let data = PCAAnalysisModel.makeClusterData(members: snapshot.subjects, conditionNames: conditionNames)
+        guard !data.subjects.isEmpty else { return nil }
+        return CPObservedContext(
+            subjects: data.subjects,
+            baselineSamples: data.baseline,
+            samplingRate: data.samplingRate
+        )
     }
 
     private func currentTimeAxis() -> EPTensor.TimeAxis? {
-        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
-        let input = snapshot.input
+        guard let input = sourceInput else { return nil }
         return EPTensor.selectTimeSamples(
             samplingRate: input.samplingRate, baselineSamples: input.baselineSamples,
             nTimes: input.nTimes, preMS: trimPre, postMS: trimPost, downsample: downsample)
@@ -448,8 +669,7 @@ struct TensorView: View {
 
     private func initializeWindowIfNeeded() {
         guard !windowInitialized,
-              let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return }
-        let input = snapshot.input
+              let input = sourceInput else { return }
         if input.samplingRate > 0 {
             trimPre = Double(-input.baselineSamples) / input.samplingRate * 1000
             trimPost = Double(input.nTimes - input.baselineSamples) / input.samplingRate * 1000
@@ -512,8 +732,8 @@ struct TensorView: View {
 
     /// Gather the Sendable inputs for an off-actor assembly.
     private func assemblyInputs() -> (EPTensor.Input, [Int]?, (Bool, Bool, Bool), TFTensorBuilder.Parameters)? {
-        guard let snapshot = EPTensor.snapshot(datasets: members, conditionNames: conditionNames) else { return nil }
-        return (snapshot.input, currentTimeAxis()?.indices,
+        guard let input = sourceInput else { return nil }
+        return (input, currentTimeAxis()?.indices,
                 (centerSubjects, centerTime, scaleChannels), tfParameters())
     }
 

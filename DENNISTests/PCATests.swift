@@ -94,6 +94,345 @@ struct PCATests {
         #expect(abs(result.totalVariance - 0.9978802629) < 1e-5)
     }
 
+    @Test func matrixAndLoadingOptionsProduceFiniteSolutions() throws {
+        for decomposition in PCADecomposition.allCases {
+            for matrixType in PCAMatrixType.allCases {
+                for loading in PCALoading.allCases {
+                    let result = try PCACore.doPCA(
+                        Matrix(Self.input),
+                        mode: .asIs,
+                        rotation: .varimax,
+                        nFactors: 2,
+                        decomposition: decomposition,
+                        matrixType: matrixType,
+                        loading: loading
+                    )
+                    #expect(result.pattern.grid.allSatisfy { $0.isFinite })
+                    #expect(result.structure.grid.allSatisfy { $0.isFinite })
+                    #expect(result.scores.grid.allSatisfy { $0.isFinite })
+                    #expect(result.variance.allSatisfy { $0.isFinite })
+                }
+            }
+        }
+    }
+
+    @Test func leaveOneSubjectOutJackknifeSummarizesAlignedLoadings() throws {
+        let tensor = TwoStepTests.tensor
+        let full = try PCACore.doPCA(
+            tensor.reshape(forMode: .temporal),
+            mode: .temporal,
+            rotation: .unrotated,
+            nFactors: 3
+        )
+        let jackknife = try PCAJackknife.leaveOneSubjectOut(
+            tensor: tensor,
+            mode: .temporal,
+            fullResult: full,
+            subjectNames: ["S1", "S2", "S3", "S4"],
+            rotation: .unrotated,
+            nFactors: 3
+        )
+
+        #expect(jackknife.succeeded == 4)
+        #expect(jackknife.loadingMean.rows == full.pattern.rows)
+        #expect(jackknife.loadingMean.cols == full.pattern.cols)
+        #expect(jackknife.loadingSD.grid.allSatisfy { $0.isFinite })
+        #expect(jackknife.maxLoadingSD > 0)
+    }
+
+    @MainActor
+    @Test func reconstructedDualFactorPreservesTensorShapeAndMetadata() throws {
+        let result = try TwoStepPCA.run(
+            tensor: TwoStepTests.tensor,
+            firstMode: .temporal,
+            secondMode: .spatial,
+            firstFactors: 3,
+            secondFactors: 2,
+            firstRotation: .unrotated,
+            secondRotation: .unrotated
+        )
+        let bundle = AnalysisStore.DualBundle(
+            result: result,
+            groupID: "all",
+            groupLabel: "All Subjects",
+            conditionNames: ["Target", "Standard"],
+            subjectNames: ["S1", "S2", "S3", "S4"],
+            subjectLevels: [["Control"], ["Control"], ["Patient"], ["Patient"]],
+            factorNames: ["Group"],
+            conditionMetadata: ConditionModeMetadata(
+                factorNames: ["Stimulus"],
+                levelsByCondition: [["Target"], ["Standard"]]
+            ),
+            sensorLayout: nil,
+            nChannels: 5,
+            samplingRate: 250,
+            baselineSamples: 25
+        )
+        let factor = try #require(result.factors.first)
+        let built = try #require(DerivedDataBuilder.reconstructedDualFactor(bundle: bundle, factor: factor))
+        let input = built.input
+
+        #expect(input.nChannels == 5)
+        #expect(input.nTimes == 8)
+        #expect(input.conditionCount == 2)
+        #expect(input.subjects.count == 4)
+        #expect(input.subjects.allSatisfy { $0.count == 2 })
+        #expect(input.subjects.flatMap { $0 }.allSatisfy { $0.count == 5 })
+        #expect(input.subjects.flatMap { $0 }.flatMap { $0 }.allSatisfy { $0.count == 8 })
+        #expect(input.samplingRate == 250)
+        #expect(input.baselineSamples == 25)
+        #expect(built.channelIndices == nil)
+        #expect(input.subjects.flatMap { $0 }.flatMap { $0 }.flatMap { $0 }.allSatisfy { $0.isFinite })
+    }
+
+    @MainActor
+    @Test func reconstructedDualFactorCanKeepOnlySelectedElectrodes() throws {
+        let result = try TwoStepPCA.run(
+            tensor: TwoStepTests.tensor,
+            firstMode: .temporal,
+            secondMode: .spatial,
+            firstFactors: 3,
+            secondFactors: 2,
+            firstRotation: .unrotated,
+            secondRotation: .unrotated
+        )
+        let bundle = AnalysisStore.DualBundle(
+            result: result,
+            groupID: "all",
+            groupLabel: "All Subjects",
+            conditionNames: ["Target", "Standard"],
+            subjectNames: ["S1", "S2", "S3", "S4"],
+            subjectLevels: [[], [], [], []],
+            factorNames: [],
+            conditionMetadata: .empty,
+            sensorLayout: nil,
+            nChannels: 5,
+            samplingRate: 250,
+            baselineSamples: 25
+        )
+        let factor = try #require(result.factors.first)
+        let spatial = result.second[factor.firstIndex].pattern.column(factor.secondIndex)
+        let threshold = spatial.map(abs).sorted()[2]
+        let built = try #require(DerivedDataBuilder.reconstructedDualFactor(
+            bundle: bundle,
+            factor: factor,
+            scope: .selectedElectrodes,
+            threshold: threshold
+        ))
+
+        #expect(built.input.nChannels == built.channelIndices?.count)
+        #expect((built.channelIndices ?? []).allSatisfy { abs(spatial[$0]) >= threshold })
+        #expect(built.input.nChannels < bundle.nChannels)
+    }
+
+    @MainActor
+    @Test func reconstructedDualFactorCanAverageSpatialLoadingClusters() throws {
+        let result = try TwoStepPCA.run(
+            tensor: TwoStepTests.tensor,
+            firstMode: .temporal,
+            secondMode: .spatial,
+            firstFactors: 3,
+            secondFactors: 2,
+            firstRotation: .unrotated,
+            secondRotation: .unrotated
+        )
+        let bundle = AnalysisStore.DualBundle(
+            result: result,
+            groupID: "all",
+            groupLabel: "All Subjects",
+            conditionNames: ["Target", "Standard"],
+            subjectNames: ["S1", "S2", "S3", "S4"],
+            subjectLevels: [[], [], [], []],
+            factorNames: [],
+            conditionMetadata: .empty,
+            sensorLayout: nil,
+            nChannels: 5,
+            samplingRate: 250,
+            baselineSamples: 25
+        )
+        let factor = try #require(result.factors.first)
+        let spatial = result.second[factor.firstIndex].pattern.column(factor.secondIndex)
+        let spatialSD = result.second[factor.firstIndex].variableSD
+        let temporal = result.first.pattern.column(factor.firstIndex)
+        let temporalSD = result.first.variableSD
+        let score = result.second[factor.firstIndex].scores[0, factor.secondIndex]
+        let clusters = [
+            (0..<bundle.nChannels).filter { spatial[$0] > 0 },
+            (0..<bundle.nChannels).filter { spatial[$0] < 0 }
+        ].filter { !$0.isEmpty }
+        let built = try #require(DerivedDataBuilder.reconstructedDualFactor(
+            bundle: bundle,
+            factor: factor,
+            output: .clusterAverages
+        ))
+
+        #expect(built.input.nChannels == clusters.count)
+        #expect(built.channelIndices == nil)
+        for (clusterIndex, channels) in clusters.enumerated() {
+            let spatialMicrovolts = channels.reduce(0.0) {
+                $0 + spatial[$1] * spatialSD[$1]
+            } / Double(channels.count)
+            let expected = Float(score * spatialMicrovolts * temporal[0] * temporalSD[0])
+            let actual = built.input.subjects[0][0][clusterIndex][0]
+            #expect(abs(actual - expected) < 1e-5)
+        }
+    }
+
+    @MainActor
+    @Test func derivedDataExporterWritesLongFormCSVAndTSV() {
+        let item = AnalysisStore.DerivedDataItem(
+            id: UUID(),
+            name: "Comma, Factor",
+            kind: .reconstructedDualFactor,
+            sourceGroupID: "all",
+            sourceGroupLabel: "All",
+            selectedFactorName: "TF1SF1",
+            conditionNames: ["Target"],
+            subjectNames: ["S1"],
+            subjectLevels: [["Control"]],
+            factorNames: ["Group"],
+            conditionMetadata: ConditionModeMetadata(
+                factorNames: ["Stimulus"],
+                levelsByCondition: [["Oddball"]]
+            ),
+            input: EPTensor.Input(
+                nChannels: 1,
+                nTimes: 2,
+                conditionCount: 1,
+                subjects: [[[[1.25, -2.5]]]],
+                samplingRate: 1000,
+                baselineSamples: 1
+            ),
+            channelIndices: nil,
+            nativeUnit: .component,
+            microvoltScale: nil,
+            factorPreview: nil,
+            provenance: "test"
+        )
+
+        let csv = DerivedDataExporter.table(item, format: .csv)
+        let tsv = DerivedDataExporter.table(item, format: .tsv)
+
+        #expect(csv.split(separator: "\n").count == 3)
+        #expect(csv.contains("\"Comma, Factor\""))
+        #expect(csv.contains("-1,component units,1.25"))
+        #expect(tsv.split(separator: "\n").count == 3)
+        #expect(tsv.contains("\tControl\tTarget\tOddball\t"))
+        #expect(tsv.contains("0\tcomponent units\t-2.5"))
+    }
+
+    @MainActor
+    @Test func derivedDataExporterCanWriteMicrovoltScaledValues() {
+        let item = AnalysisStore.DerivedDataItem(
+            id: UUID(),
+            name: "Scaled",
+            kind: .reconstructedDualFactor,
+            sourceGroupID: "all",
+            sourceGroupLabel: "All",
+            selectedFactorName: "TF1SF1",
+            conditionNames: ["Target"],
+            subjectNames: ["S1"],
+            subjectLevels: [[]],
+            factorNames: [],
+            conditionMetadata: .empty,
+            input: EPTensor.Input(
+                nChannels: 1,
+                nTimes: 2,
+                conditionCount: 1,
+                subjects: [[[[1, 2]]]],
+                samplingRate: 1000,
+                baselineSamples: 0
+            ),
+            channelIndices: nil,
+            nativeUnit: .component,
+            microvoltScale: [[2, 3]],
+            factorPreview: nil,
+            provenance: "test"
+        )
+
+        let csv = DerivedDataExporter.table(
+            DerivedDataExporter.Snapshot(item: item),
+            format: .csv,
+            units: .microvolts
+        )
+
+        #expect(csv.contains("µV,2"))
+        #expect(csv.contains("µV,6"))
+    }
+
+    @Test func tableImporterRecognizesDerivedExportHeaders() {
+        let headers = [
+            "DerivedData", "Kind", "SourceGroup", "SelectedFactor",
+            "Subject", "Group", "Condition", "Stimulus",
+            "Channel", "TimeIndex", "Time_ms", "Unit", "Value"
+        ]
+
+        #expect(TableDataImporter.looksLikeDerivedData(headers: headers))
+        #expect(!TableDataImporter.looksLikeDerivedData(headers: ["Subject", "Age", "Accuracy"]))
+    }
+
+    @Test func tableImporterHandlesWindowsCRLFLineEndings() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("behavioral_crlf_\(UUID().uuidString)")
+            .appendingPathExtension("csv")
+        try "Subject,Age,Accuracy\r\nS1,20,0.95\r\nS2,21,0.90\r\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let parsed = try TableDataImporter.parse(url: url)
+
+        #expect(parsed.headers == ["Subject", "Age", "Accuracy"])
+        #expect(parsed.rows.count == 2)
+        #expect(parsed.rows[1] == ["S2", "21", "0.90"])
+    }
+
+    @MainActor
+    @Test func derivedDataCSVCanBeReimported() async throws {
+        let item = AnalysisStore.DerivedDataItem(
+            id: UUID(),
+            name: "Round Trip",
+            kind: .reconstructedDualFactor,
+            sourceGroupID: "all",
+            sourceGroupLabel: "All",
+            selectedFactorName: "TF1SF1",
+            conditionNames: ["A"],
+            subjectNames: ["S1"],
+            subjectLevels: [["Control"]],
+            factorNames: ["Group"],
+            conditionMetadata: ConditionModeMetadata(factorNames: ["Stimulus"], levelsByCondition: [["A"]]),
+            input: EPTensor.Input(
+                nChannels: 2,
+                nTimes: 2,
+                conditionCount: 1,
+                subjects: [[[[1, 2], [3, 4]]]],
+                samplingRate: 1000,
+                baselineSamples: 1
+            ),
+            channelIndices: [0, 2],
+            nativeUnit: .component,
+            microvoltScale: nil,
+            factorPreview: nil,
+            provenance: "test"
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("derived_roundtrip_\(UUID().uuidString)")
+            .appendingPathExtension("csv")
+        try DerivedDataExporter.table(item, format: .csv).write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let imported = try await TableDataImporter.loadDerivedData(from: url)
+        #expect(imported.name == "Round Trip")
+        #expect(imported.subjectNames == ["S1"])
+        #expect(imported.conditionNames == ["A"])
+        #expect(imported.input.nChannels == 2)
+        #expect(imported.input.nTimes == 2)
+        #expect(imported.input.samplingRate == 1000)
+        #expect(imported.input.baselineSamples == 1)
+        #expect(imported.channelIndices == [0, 2])
+        #expect(imported.nativeUnit == .component)
+        #expect(imported.input.subjects[0][0][1][1] == 4)
+    }
+
     // MARK: - Comparison helpers
 
     /// True if result columns equal expected columns up to permutation and a

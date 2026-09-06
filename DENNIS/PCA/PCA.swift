@@ -10,17 +10,33 @@
 //  This is the single-step engine; the temporal→spatial two-step workflow is
 //  layered on top of this.
 //
+//  References (full citations in `Model/References.swift`):
+//    - Dien (2010), J Neurosci Methods 187(1):138-145 — the ERP PCA Toolkit
+//      workflow this ports, including matrix type and Kaiser normalization.
+//    - Dien, Beal & Berg (2005), Clin Neurophysiol 116(8):1808-1825 — the
+//      rationale for that matrix-type and rotation choice on ERP data.
+//    - Kaiser (1958), Psychometrika 23(3):187-200 — the loading normalization.
+//
 
 import Foundation
 
 nonisolated enum PCAMatrixType: String, CaseIterable { case cov = "COV", cor = "COR", scp = "SCP" }
+nonisolated enum PCADecomposition: String, CaseIterable {
+    case svd = "SVD"
+    case nipals = "NIPALS"
+}
 nonisolated enum PCARotation: String, CaseIterable {
     case unrotated, varimax, promax, infomax, extendedInfomax
 
     /// True for the Infomax family, which bypasses the Kaiser loading path.
     var isInfomax: Bool { self == .infomax || self == .extendedInfomax }
 }
-nonisolated enum PCALoading: String, CaseIterable { case kaiser = "K", none = "N" }
+nonisolated enum PCALoading: String, CaseIterable {
+    case kaiser = "K"
+    case none = "N"
+    case covariance = "C"
+    case curetonMulaik = "W"
+}
 
 nonisolated struct PCAResult {
     /// Variables × factors loading (pattern) matrix.
@@ -48,6 +64,26 @@ nonisolated struct PCAResult {
     let nFactors: Int
 }
 
+nonisolated struct PCAJackknifeResult: Sendable {
+    let subjectNames: [String]
+    /// Variable × factor mean loading after congruence/sign alignment.
+    let loadingMean: Matrix
+    /// Variable × factor leave-one-subject-out loading standard deviation.
+    let loadingSD: Matrix
+    /// Mean of each PCA run's per-variable SD vector.
+    let variableSDMean: [Double]
+    /// Leave-one-subject-out SD of the PCA variable SD vector.
+    let variableSDSD: [Double]
+    let succeeded: Int
+    let failures: [String]
+
+    var maxLoadingSD: Double { loadingSD.grid.max() ?? 0 }
+    var meanLoadingSD: Double {
+        guard !loadingSD.grid.isEmpty else { return 0 }
+        return loadingSD.grid.reduce(0, +) / Double(loadingSD.grid.count)
+    }
+}
+
 nonisolated enum PCAError: Error, LocalizedError {
     case noGoodVariables
     case tooMuchBadData
@@ -71,6 +107,7 @@ nonisolated enum PCACore {
         mode: PCAMode = .asIs,
         rotation: PCARotation = .promax,
         nFactors: Int,
+        decomposition: PCADecomposition = .svd,
         matrixType: PCAMatrixType = .cov,
         loading: PCALoading = .kaiser,
         rotopt: Double = 3,
@@ -110,12 +147,18 @@ nonisolated enum PCACore {
         let relation = crossProduct(relationData).scaled(1.0 / Double(work.rows - 1))
         let sdRelation = (0..<relation.rows).map { relation[$0, $0].squareRoot() }
 
-        // Eigendecomposition (ascending) → take top nFactors descending.
-        report?(0.5, "Eigendecomposition")
+        // Eigendecomposition (ascending) → full scree and SVD/default factors.
+        report?(0.5, decomposition == .nipals ? "NIPALS decomposition" : "Eigendecomposition")
         let (eigValsAsc, eigVecsAsc) = try relation.symmetricEigen()
         let order = Array((0..<eigValsAsc.count).reversed())  // descending
         let scree = order.map { eigValsAsc[$0] }
-        let eigVecs = reorderColumns(eigVecsAsc, order: Array(order.prefix(nFactors)))
+        let eigVecs: Matrix
+        switch decomposition {
+        case .svd:
+            eigVecs = reorderColumns(eigVecsAsc, order: Array(order.prefix(nFactors)))
+        case .nipals:
+            eigVecs = nipalsComponents(relationData, nFactors: nFactors)
+        }
 
         // Score coefficients & initial scores.
         let scoreCoefficients: Matrix
@@ -156,14 +199,47 @@ nonisolated enum PCACore {
                 }
             }
 
-            // Kaiser normalization.
+            // EP Toolkit loading normalization / weighting.
             let communalities = (0..<loadings.rows).map { r in
                 (0..<loadings.cols).reduce(0.0) { $0 + loadings[r, $1] * loadings[r, $1] }
             }
-            if loading == .kaiser {
+            var curetonWeights = [Double](repeating: 1, count: loadings.rows)
+            var curetonReflect = [Double](repeating: 1, count: loadings.rows)
+            switch loading {
+            case .kaiser:
                 for r in 0..<loadings.rows {
                     let denom = communalities[r].squareRoot()
                     if denom != 0 { for c in 0..<loadings.cols { loadings[r, c] /= denom } }
+                }
+            case .covariance:
+                for r in 0..<loadings.rows {
+                    for c in 0..<loadings.cols { loadings[r, c] *= sdRelation[r] }
+                }
+            case .none:
+                break
+            case .curetonMulaik:
+                for r in 0..<loadings.rows {
+                    let denom = communalities[r].squareRoot()
+                    if denom != 0 { for c in 0..<loadings.cols { loadings[r, c] /= denom } }
+                }
+                guard nFactors > 1 else { break }
+                let target = (1.0 / Double(nFactors)).squareRoot()
+                let targetAngle = acos(target)
+                let halfPi = Double.pi / 2
+                for r in 0..<loadings.rows {
+                    let reflected = loadings[r, 0] < 0 ? -1.0 : 1.0
+                    curetonReflect[r] = reflected
+                    for c in 0..<loadings.cols { loadings[r, c] *= reflected }
+                    let firstLoading = loadings[r, 0]
+                    let angle = acos(min(1, max(-1, firstLoading)))
+                    let weight: Double
+                    if firstLoading >= target {
+                        weight = pow(cos(((targetAngle - angle) / targetAngle) * halfPi), 2) + 0.001
+                    } else {
+                        weight = pow(cos(((angle - targetAngle) / (halfPi - targetAngle)) * halfPi), 2) + 0.001
+                    }
+                    curetonWeights[r] = weight
+                    for c in 0..<loadings.cols { loadings[r, c] *= weight }
                 }
             }
 
@@ -188,13 +264,32 @@ nonisolated enum PCACore {
                 fatalError("Infomax handled above")
             }
 
-            // Undo Kaiser normalization.
-            if loading == .kaiser {
+            // Undo loading normalization / weighting before computing final scores.
+            switch loading {
+            case .kaiser:
                 for r in 0..<pattern.rows {
                     let scale = communalities[r].squareRoot()
                     for c in 0..<pattern.cols {
                         pattern[r, c] *= scale
                         structure[r, c] *= scale
+                    }
+                }
+            case .covariance:
+                for r in 0..<pattern.rows where sdRelation[r] != 0 {
+                    for c in 0..<pattern.cols {
+                        pattern[r, c] /= sdRelation[r]
+                        structure[r, c] /= sdRelation[r]
+                    }
+                }
+            case .none:
+                break
+            case .curetonMulaik:
+                for r in 0..<pattern.rows {
+                    let inverseWeight = curetonWeights[r] == 0 ? 1 : 1 / curetonWeights[r]
+                    let scale = communalities[r].squareRoot()
+                    for c in 0..<pattern.cols {
+                        pattern[r, c] *= inverseWeight * curetonReflect[r] * scale
+                        structure[r, c] *= inverseWeight * curetonReflect[r] * scale
                     }
                 }
             }
@@ -294,6 +389,98 @@ nonisolated enum PCACore {
         return out
     }
 
+    private static func nipalsComponents(
+        _ data: Matrix,
+        nFactors: Int,
+        maxIterations: Int = 20_000,
+        tolerance: Double = 1e-5
+    ) -> Matrix {
+        var residual = data
+        var components = Matrix(rows: data.cols, cols: nFactors)
+        let initialColumn = columnStd(data).enumerated().max { $0.element < $1.element }?.offset ?? 0
+
+        for factor in 0..<nFactors {
+            var scores = residual.column(initialColumn)
+            if vectorNorm(scores) == 0 {
+                scores = residual.column(maxVarianceColumn(residual))
+            }
+            guard vectorNorm(scores) > 0 else { break }
+
+            var loadings = [Double](repeating: 0, count: residual.cols)
+            for _ in 0..<maxIterations {
+                let oldScores = scores
+                loadings = multiplyTransposed(residual, by: scores)
+                let scoreSS = dot(scores, scores)
+                if scoreSS != 0 {
+                    for i in 0..<loadings.count { loadings[i] /= scoreSS }
+                }
+                normalize(&loadings)
+
+                scores = multiply(residual, by: loadings)
+                let loadingSS = dot(loadings, loadings)
+                if loadingSS != 0 {
+                    for i in 0..<scores.count { scores[i] /= loadingSS }
+                }
+
+                if squaredDistance(scores, oldScores) <= tolerance * tolerance { break }
+            }
+
+            for r in 0..<components.rows { components[r, factor] = loadings[r] }
+            for r in 0..<residual.rows {
+                for c in 0..<residual.cols {
+                    residual[r, c] -= scores[r] * loadings[c]
+                }
+            }
+        }
+
+        return components
+    }
+
+    private static func maxVarianceColumn(_ m: Matrix) -> Int {
+        columnStd(m).enumerated().max { $0.element < $1.element }?.offset ?? 0
+    }
+
+    private static func multiply(_ m: Matrix, by vector: [Double]) -> [Double] {
+        var out = [Double](repeating: 0, count: m.rows)
+        for r in 0..<m.rows {
+            var sum = 0.0
+            for c in 0..<m.cols { sum += m[r, c] * vector[c] }
+            out[r] = sum
+        }
+        return out
+    }
+
+    private static func multiplyTransposed(_ m: Matrix, by vector: [Double]) -> [Double] {
+        var out = [Double](repeating: 0, count: m.cols)
+        for c in 0..<m.cols {
+            var sum = 0.0
+            for r in 0..<m.rows { sum += m[r, c] * vector[r] }
+            out[c] = sum
+        }
+        return out
+    }
+
+    private static func normalize(_ vector: inout [Double]) {
+        let norm = vectorNorm(vector)
+        guard norm > 0 else { return }
+        for i in 0..<vector.count { vector[i] /= norm }
+    }
+
+    private static func vectorNorm(_ vector: [Double]) -> Double {
+        dot(vector, vector).squareRoot()
+    }
+
+    private static func dot(_ left: [Double], _ right: [Double]) -> Double {
+        zip(left, right).reduce(0.0) { $0 + $1.0 * $1.1 }
+    }
+
+    private static func squaredDistance(_ left: [Double], _ right: [Double]) -> Double {
+        zip(left, right).reduce(0.0) {
+            let diff = $1.0 - $1.1
+            return $0 + diff * diff
+        }
+    }
+
     // MARK: - Variance helper
 
     private static func uniqueFactorVariance(pattern: Matrix, correlation: Matrix,
@@ -312,5 +499,159 @@ nonisolated enum PCACore {
             result[c] = acc / denom
         }
         return result
+    }
+}
+
+nonisolated enum PCAJackknife {
+    static func leaveOneSubjectOut(
+        tensor: EPTensor,
+        mode: PCAMode,
+        fullResult: PCAResult,
+        subjectNames: [String],
+        rotation: PCARotation,
+        nFactors: Int,
+        decomposition: PCADecomposition = .svd,
+        matrixType: PCAMatrixType = .cov,
+        loading: PCALoading = .kaiser,
+        rotopt: Double = 3,
+        seed: UInt64 = 0,
+        report: PCAProgressHandler? = nil,
+        progressRange: ClosedRange<Double> = 0...1
+    ) throws -> PCAJackknifeResult {
+        let nSubjects = tensor.nSubjects
+        guard nSubjects > 1 else { throw PCAError.tooFewObservations(needed: 2, have: nSubjects) }
+
+        var alignedPatterns: [Matrix] = []
+        var variableSDs: [[Double]] = []
+        var keptNames: [String] = []
+        var failures: [String] = []
+
+        for heldOut in 0..<nSubjects {
+            let name = subjectNames.indices.contains(heldOut) ? subjectNames[heldOut] : "Subject \(heldOut + 1)"
+            let fraction = progressRange.lowerBound
+                + (progressRange.upperBound - progressRange.lowerBound) * Double(heldOut) / Double(nSubjects)
+            report?(fraction, "Jackknife \(heldOut + 1)/\(nSubjects): refitting PCA without \(name)")
+            do {
+                let indices = (0..<nSubjects).filter { $0 != heldOut }
+                let subset = tensor.selectingSubjects(indices)
+                let result = try PCACore.doPCA(
+                    subset.reshape(forMode: mode),
+                    mode: mode,
+                    rotation: rotation,
+                    nFactors: min(nFactors, subset.variableCount(for: mode)),
+                    decomposition: decomposition,
+                    matrixType: matrixType,
+                    loading: loading,
+                    rotopt: rotopt,
+                    seed: seed
+                )
+                alignedPatterns.append(align(result.pattern, to: fullResult.pattern))
+                variableSDs.append(result.variableSD)
+                keptNames.append(name)
+            } catch {
+                failures.append("\(name): \((error as? LocalizedError)?.errorDescription ?? String(describing: error))")
+            }
+        }
+
+        guard let first = alignedPatterns.first else { throw PCAError.tooMuchBadData }
+        let loadingMean = meanMatrix(alignedPatterns, rows: first.rows, cols: first.cols)
+        let loadingSD = sdMatrix(alignedPatterns, mean: loadingMean)
+        let sdLength = variableSDs.map(\.count).min() ?? 0
+        let variableSDMean = meanVectors(variableSDs.map { Array($0.prefix(sdLength)) }, length: sdLength)
+        let variableSDSD = sdVectors(variableSDs.map { Array($0.prefix(sdLength)) }, mean: variableSDMean)
+
+        report?(progressRange.upperBound, "Jackknife complete: \(alignedPatterns.count) leave-one-subject-out PCA refits.")
+        return PCAJackknifeResult(
+            subjectNames: keptNames,
+            loadingMean: loadingMean,
+            loadingSD: loadingSD,
+            variableSDMean: variableSDMean,
+            variableSDSD: variableSDSD,
+            succeeded: alignedPatterns.count,
+            failures: failures
+        )
+    }
+
+    private static func align(_ candidate: Matrix, to reference: Matrix) -> Matrix {
+        guard candidate.rows == reference.rows, candidate.cols == reference.cols else { return candidate }
+        var out = Matrix(rows: candidate.rows, cols: candidate.cols)
+        var used = Set<Int>()
+        for refCol in 0..<reference.cols {
+            var bestCol = 0
+            var bestScore = -Double.infinity
+            var bestSign = 1.0
+            for candCol in 0..<candidate.cols where !used.contains(candCol) {
+                let score = congruence(reference, refCol, candidate, candCol)
+                if abs(score) > bestScore {
+                    bestScore = abs(score)
+                    bestCol = candCol
+                    bestSign = score < 0 ? -1 : 1
+                }
+            }
+            used.insert(bestCol)
+            for r in 0..<candidate.rows { out[r, refCol] = candidate[r, bestCol] * bestSign }
+        }
+        return out
+    }
+
+    private static func congruence(_ a: Matrix, _ ac: Int, _ b: Matrix, _ bc: Int) -> Double {
+        var dot = 0.0
+        var aa = 0.0
+        var bb = 0.0
+        for r in 0..<a.rows {
+            let av = a[r, ac]
+            let bv = b[r, bc]
+            dot += av * bv
+            aa += av * av
+            bb += bv * bv
+        }
+        guard aa > 0, bb > 0 else { return 0 }
+        return dot / (aa.squareRoot() * bb.squareRoot())
+    }
+
+    private static func meanMatrix(_ matrices: [Matrix], rows: Int, cols: Int) -> Matrix {
+        var out = Matrix(rows: rows, cols: cols)
+        guard !matrices.isEmpty else { return out }
+        for matrix in matrices {
+            for i in 0..<out.grid.count { out.grid[i] += matrix.grid[i] }
+        }
+        for i in 0..<out.grid.count { out.grid[i] /= Double(matrices.count) }
+        return out
+    }
+
+    private static func sdMatrix(_ matrices: [Matrix], mean: Matrix) -> Matrix {
+        var out = Matrix(rows: mean.rows, cols: mean.cols)
+        guard matrices.count > 1 else { return out }
+        for matrix in matrices {
+            for i in 0..<out.grid.count {
+                let d = matrix.grid[i] - mean.grid[i]
+                out.grid[i] += d * d
+            }
+        }
+        for i in 0..<out.grid.count { out.grid[i] = (out.grid[i] / Double(matrices.count - 1)).squareRoot() }
+        return out
+    }
+
+    private static func meanVectors(_ vectors: [[Double]], length: Int) -> [Double] {
+        guard !vectors.isEmpty, length > 0 else { return [] }
+        var out = [Double](repeating: 0, count: length)
+        for vector in vectors {
+            for i in 0..<length { out[i] += vector[i] }
+        }
+        for i in 0..<length { out[i] /= Double(vectors.count) }
+        return out
+    }
+
+    private static func sdVectors(_ vectors: [[Double]], mean: [Double]) -> [Double] {
+        guard vectors.count > 1, !mean.isEmpty else { return [Double](repeating: 0, count: mean.count) }
+        var out = [Double](repeating: 0, count: mean.count)
+        for vector in vectors {
+            for i in 0..<mean.count {
+                let d = vector[i] - mean[i]
+                out[i] += d * d
+            }
+        }
+        for i in 0..<out.count { out[i] = (out[i] / Double(vectors.count - 1)).squareRoot() }
+        return out
     }
 }
