@@ -3,7 +3,7 @@
 //  DENNIS
 //
 //  The left-hand tree: nested between-subject groups (collapsible) → datasets
-//  (subjects) → within-subject conditions. Accepts dropped MFF packages and
+//  (subjects) → within-subject conditions. Accepts dropped averaged MFF and FIF files and
 //  folders of them.
 //
 
@@ -64,7 +64,7 @@ struct SidebarView: View {
             Image(systemName: "tray.and.arrow.down")
                 .font(.system(size: 38))
                 .foregroundStyle(.secondary)
-            Text("Drop averaged MFF files or folders here")
+            Text("Drop averaged MFF or FIF files or folders here")
                 .font(.headline)
             Text("Each file is treated as one subject.\nFolder names become between-subject factors.")
                 .font(.caption)

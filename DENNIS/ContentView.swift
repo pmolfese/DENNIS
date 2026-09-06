@@ -3,7 +3,7 @@
 //  DENNIS
 //
 //  Root layout: a sidebar of grouped datasets/conditions on the left, a detail
-//  pane on the right. Dropping (or opening) MFF files — or folders of them —
+//  pane on the right. Dropping (or opening) averaged MFF or FIF files — or folders of them —
 //  raises an import sheet that lets the user name between-subject factors and
 //  assign levels before the files land in the tree.
 //
@@ -38,7 +38,7 @@ struct ContentView: View {
         }
         .fileImporter(
             isPresented: $showFileImporter,
-            allowedContentTypes: [.mffPackage, .folder],
+            allowedContentTypes: [.mffPackage, .fif, .fifGzip, .folder],
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
@@ -82,6 +82,14 @@ extension UTType {
     /// EGI MFF recording package (a directory bundle).
     static var mffPackage: UTType {
         UTType(importedAs: "com.egi.mff")
+    }
+
+    static var fif: UTType {
+        UTType(filenameExtension: "fif")!
+    }
+
+    static var fifGzip: UTType {
+        UTType(filenameExtension: "gz")!
     }
 }
 

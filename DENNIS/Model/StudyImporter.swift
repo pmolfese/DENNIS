@@ -56,7 +56,8 @@ final class ImportCandidate: Identifiable {
 @Observable
 @MainActor
 final class StudyImporter {
-    private let loader = MFFAveragedLoader()
+    private let mffLoader = MFFAveragedLoader()
+    private let fifLoader = FIFAveragedLoader()
 
     /// Plain Sendable preview of one file, computed off the main actor.
     private struct RawCandidate: Sendable {
@@ -71,13 +72,14 @@ final class StudyImporter {
     /// file work runs off-actor; the observable plan is built back on the main
     /// actor (where these `@Observable` types are isolated).
     func makePlan(from urls: [URL]) async -> ImportPlan {
-        let loader = self.loader
+        let mffLoader = self.mffLoader
+        let fifLoader = self.fifLoader
         let (factorCount, raw): (Int, [RawCandidate]) = await Task.detached(priority: .userInitiated) {
             let packages = Self.expandToMFFPackages(urls)
             guard !packages.isEmpty else { return (0, []) }
 
             let (factorCount, levelsByURL) = Self.inferLevels(for: packages)
-            let raw = Self.inspectPackages(packages, levelsByURL: levelsByURL, loader: loader)
+            let raw = Self.inspectPackages(packages, levelsByURL: levelsByURL, mffLoader: mffLoader, fifLoader: fifLoader)
             return (factorCount, raw)
         }.value
 
@@ -114,10 +116,11 @@ final class StudyImporter {
     func load(_ dataset: Dataset) {
         dataset.loadState = .loading
         let url = dataset.sourceURL
-        let loader = self.loader
+        let mffLoader = self.mffLoader
+        let fifLoader = self.fifLoader
         Task {
             let result: Result<AveragedMFF, Error> = await Task.detached(priority: .userInitiated) {
-                do { return .success(try loader.load(at: url)) }
+                do { return .success(try Self.loadAveraged(at: url, mffLoader: mffLoader, fifLoader: fifLoader)) }
                 catch { return .failure(error) }
             }.value
 
@@ -142,8 +145,7 @@ final class StudyImporter {
 
     // MARK: - Folder expansion
 
-    /// Recursively resolve dropped URLs into `.mff` package directories. A
-    /// `.mff` is itself a directory, so we treat it as a leaf and don't descend.
+    /// Recursively resolve dropped URLs into averaged MFF packages and FIF files.
     nonisolated static func expandToMFFPackages(_ urls: [URL]) -> [URL] {
         var found: [URL] = []
         var seen = Set<String>()
@@ -158,7 +160,7 @@ final class StudyImporter {
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
 
-            if url.pathExtension.lowercased() == "mff" {
+            if isImportableRecording(url) {
                 add(url)
                 continue
             }
@@ -168,9 +170,9 @@ final class StudyImporter {
             // Walk the tree, treating any .mff directory as a leaf package.
             if let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey]) {
                 for case let child as URL in enumerator {
-                    if child.pathExtension.lowercased() == "mff" {
+                    if isImportableRecording(child) {
                         add(child)
-                        enumerator.skipDescendants()
+                        if child.pathExtension.lowercased() == "mff" { enumerator.skipDescendants() }
                     }
                 }
             }
@@ -224,7 +226,8 @@ final class StudyImporter {
     private nonisolated static func inspectPackages(
         _ packages: [URL],
         levelsByURL: [URL: [String]],
-        loader: MFFAveragedLoader
+        mffLoader: MFFAveragedLoader,
+        fifLoader: FIFAveragedLoader
     ) -> [RawCandidate] {
         guard !packages.isEmpty else { return [] }
 
@@ -236,7 +239,7 @@ final class StudyImporter {
             let levels = levelsByURL[url] ?? []
             let candidate: RawCandidate
             do {
-                let conditions = try loader.inspectConditions(at: url)
+                let conditions = try inspectConditions(at: url, mffLoader: mffLoader, fifLoader: fifLoader)
                 candidate = RawCandidate(url: url, conditions: conditions, levels: levels, warning: nil)
             } catch {
                 candidate = RawCandidate(url: url, conditions: [], levels: levels,
@@ -249,5 +252,34 @@ final class StudyImporter {
         }
 
         return output.compactMap { $0 }
+    }
+
+    private nonisolated static func inspectConditions(at url: URL, mffLoader: MFFAveragedLoader,
+                                                      fifLoader: FIFAveragedLoader) throws -> [String] {
+        switch recordingFormat(url) {
+        case "mff": return try mffLoader.inspectConditions(at: url)
+        case "fif": return try fifLoader.inspectConditions(at: url)
+        default: throw FIFAveragedLoaderError.malformed("unsupported file type")
+        }
+    }
+
+    private nonisolated static func loadAveraged(at url: URL, mffLoader: MFFAveragedLoader,
+                                                 fifLoader: FIFAveragedLoader) throws -> AveragedMFF {
+        switch recordingFormat(url) {
+        case "mff": return try mffLoader.load(at: url)
+        case "fif": return try fifLoader.load(at: url)
+        default: throw FIFAveragedLoaderError.malformed("unsupported file type")
+        }
+    }
+
+    private nonisolated static func isImportableRecording(_ url: URL) -> Bool {
+        recordingFormat(url) != nil
+    }
+
+    private nonisolated static func recordingFormat(_ url: URL) -> String? {
+        let ext = url.pathExtension.lowercased()
+        if ext == "mff" || ext == "fif" { return ext }
+        if ext == "gz", url.deletingPathExtension().pathExtension.lowercased() == "fif" { return "fif" }
+        return nil
     }
 }
