@@ -1,0 +1,561 @@
+<!--
+  UI_Overhaul_opt2 — "Decomposition Stacks"
+  Second concept for the DENNIS PCA tab: Automator-style vertical stacks (steps flow
+  top to bottom through notch connectors), a horizontal icon shelf you drag steps from,
+  parallel streams locked to fixed levels, and cross-stream input links.
+  Self-contained and interactive — open in any browser.
+
+  Saved 2026-09-07. Published copy: https://claude.ai/code/artifact/ebe82b92-d2a6-4b6c-8c7e-a73c60b546aa
+  Companion: ../UI_Overhaul_opt1/UI_Overhaul_opt1.html (free-canvas node graph)
+  Put screenshots or reference images in ./assets/ and reference them relatively.
+-->
+<title>Decomposition Stacks</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#EDEFF3; --panel:#FFFFFF; --panel-2:#F4F6F9; --canvas:#E6E9EF; --card:#FFFFFF;
+  --ink:#15171C; --ink-2:#4C5361; --muted:#79818F; --line:#D5DAE2; --line-2:#C2C9D4;
+  --sel:#3B5BDB; --sel-soft:rgba(59,91,219,.12);
+  --n-source:#4B5563; --n-temporal:#B9741A; --n-spatial:#1C7F86; --n-freq:#6A56C9;
+  --n-ica:#A8446B; --n-view:#4A6FA5; --n-export:#6B7280;
+  --ok:#1F7A4D; --warn:#B26A05;
+  --shadow:0 1px 2px rgba(16,20,30,.10),0 6px 18px rgba(16,20,30,.08);
+  --ui:ui-sans-serif,-apple-system,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --serif:"Newsreader",Georgia,"Times New Roman",serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0E1015; --panel:#191C23; --panel-2:#14171D; --canvas:#0D1015; --card:#1B1F27;
+  --ink:#E7E9EE; --ink-2:#AEB5C2; --muted:#848C9B; --line:#272C36; --line-2:#333A46;
+  --sel:#7D93F5; --sel-soft:rgba(125,147,245,.16);
+  --n-source:#98A1AF; --n-temporal:#D9963F; --n-spatial:#3FA9B0; --n-freq:#9182E4;
+  --n-ica:#CE6E92; --n-view:#7A9BD1; --n-export:#98A1AF;
+  --ok:#4FBB84; --warn:#D79A3A;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 8px 22px rgba(0,0,0,.4);
+}}
+:root[data-theme="dark"]{
+  --bg:#0E1015; --panel:#191C23; --panel-2:#14171D; --canvas:#0D1015; --card:#1B1F27;
+  --ink:#E7E9EE; --ink-2:#AEB5C2; --muted:#848C9B; --line:#272C36; --line-2:#333A46;
+  --sel:#7D93F5; --sel-soft:rgba(125,147,245,.16);
+  --n-source:#98A1AF; --n-temporal:#D9963F; --n-spatial:#3FA9B0; --n-freq:#9182E4;
+  --n-ica:#CE6E92; --n-view:#7A9BD1; --n-export:#98A1AF;
+  --ok:#4FBB84; --warn:#D79A3A;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 8px 22px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--ui);line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1300px;margin:0 auto;padding:40px 24px 72px}
+header.page{display:flex;flex-wrap:wrap;align-items:flex-end;gap:26px;margin-bottom:24px}
+header.page h1{font-family:var(--serif);font-weight:500;font-size:clamp(30px,4vw,44px);line-height:1.08;
+  margin:0;letter-spacing:-.01em;max-width:13ch;text-wrap:balance}
+header.page p{margin:0;color:var(--ink-2);max-width:58ch;font-size:15px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);display:block;margin-bottom:8px}
+
+.app{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+.titlebar{display:flex;align-items:center;gap:12px;padding:9px 14px;background:var(--panel-2);border-bottom:1px solid var(--line)}
+.lights{display:flex;gap:7px}
+.lights i{width:11px;height:11px;border-radius:50%;display:block}
+.lights i:nth-child(1){background:#E8695E}.lights i:nth-child(2){background:#E2B14A}.lights i:nth-child(3){background:#57BE5F}
+.wintitle{font-size:12.5px;color:var(--ink-2);font-weight:500}
+.tabs{display:flex;gap:2px;margin-left:auto;background:var(--bg);padding:2px;border-radius:7px;border:1px solid var(--line)}
+.tabs span{font-size:12px;padding:3px 11px;border-radius:5px;color:var(--muted)}
+.tabs span.on{background:var(--panel);color:var(--ink)}
+
+/* ---- shelf: horizontal icon toolbar ---- */
+.shelf{display:flex;align-items:center;gap:4px;padding:10px 14px;border-bottom:1px solid var(--line);
+  background:var(--panel-2);overflow-x:auto}
+.tool{display:flex;flex-direction:column;align-items:center;gap:4px;width:76px;flex:none;padding:6px 2px 5px;
+  border-radius:8px;cursor:grab;border:1px solid transparent;background:transparent}
+.tool:hover{background:var(--panel);border-color:var(--line)}
+.tool:active{cursor:grabbing}
+.tool .glyph{width:30px;height:30px;border-radius:7px;background:var(--tc);color:#fff;display:grid;
+  place-items:center;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.02em}
+.tool .lbl{font-size:10.5px;color:var(--ink-2);text-align:center;line-height:1.2}
+.shelf .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 8px;flex:none}
+.shelf .spacer{flex:1}
+.btn{font:inherit;font-size:12.5px;color:var(--ink);background:var(--panel);border:1px solid var(--line-2);
+  border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--bg)}
+.btn.primary{background:var(--sel);border-color:transparent;color:#fff}
+.btn:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+
+.subbar{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.subbar b{color:var(--ink-2);font-weight:500}
+
+/* ---- stage ---- */
+.stage{display:grid;grid-template-columns:66px minmax(0,1fr);background:var(--canvas);min-height:660px}
+.gutter{border-right:1px solid var(--line);padding-top:16px;display:flex;flex-direction:column}
+.lvl{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;padding:0 10px 0 4px;
+  display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-end;gap:2px}
+.lvl b{font-size:15px;color:var(--line-2);font-weight:600;line-height:1}
+.scroller{overflow:auto;padding:16px 18px 26px;position:relative}
+.grid-wrap{position:relative;min-width:min-content}
+#links{position:absolute;inset:0;pointer-events:none;overflow:visible}
+.grid{display:grid;gap:30px 26px;align-items:start;position:relative}
+.lanehead{display:flex;align-items:center;gap:8px;padding:0 2px 2px;border-bottom:1px solid var(--line);
+  margin-bottom:2px}
+.lanehead .nm{font-size:12px;font-weight:600}
+.lanehead .meta{font-family:var(--mono);font-size:10px;color:var(--muted)}
+.lanehead button{margin-left:auto;background:none;border:0;color:var(--muted);cursor:pointer;font-size:12px;
+  padding:2px 4px;border-radius:4px}
+.lanehead button:hover{background:var(--panel);color:var(--ink)}
+
+/* ---- Automator-style card ---- */
+.slotwrap{position:relative;width:296px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);
+  overflow:hidden;position:relative}
+.card.sel{border-color:var(--sel);box-shadow:0 0 0 3px var(--sel-soft),var(--shadow)}
+.card.ghost{opacity:.4}
+.card .hd{display:flex;align-items:center;gap:8px;padding:8px 9px;cursor:grab;background:var(--card)}
+.card .hd:active{cursor:grabbing}
+.tri{background:none;border:0;color:var(--muted);cursor:pointer;font-size:9px;padding:2px;font-family:var(--mono);line-height:1}
+.card .icon{width:20px;height:20px;border-radius:5px;background:var(--nc);color:#fff;display:grid;place-items:center;
+  font-family:var(--mono);font-size:9.5px;font-weight:600;flex:none}
+.card .ttl{font-size:12.5px;font-weight:600;letter-spacing:-.005em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .x{margin-left:auto;background:none;border:0;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 4px}
+.card .x:hover{color:var(--ink)}
+.summary{padding:0 10px 9px 36px;display:flex;gap:5px;flex-wrap:wrap}
+.pill{border:1px solid var(--line-2);border-radius:20px;padding:1px 7px;font-family:var(--mono);font-size:9.5px;color:var(--ink-2)}
+.pill.link{border-style:dashed;color:var(--sel);border-color:var(--sel)}
+.pill.state{border-color:transparent;background:var(--panel-2);color:var(--muted)}
+.pill.state.done{color:var(--ok)}.pill.state.stale{color:var(--warn)}
+.card .bd{border-top:1px solid var(--line);background:var(--panel-2);padding:10px 11px 4px}
+.fields{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 9px;align-items:center;margin-bottom:9px}
+.fields label{font-size:11px;color:var(--ink-2);text-align:right;white-space:nowrap}
+select,input[type=number],input[type=text]{font:inherit;font-family:var(--mono);font-size:11px;background:var(--card);
+  color:var(--ink);border:1px solid var(--line-2);border-radius:5px;padding:2px 5px;width:100%;min-width:0}
+.seg{display:flex;border:1px solid var(--line-2);border-radius:5px;overflow:hidden}
+.seg button{flex:1;font:inherit;font-size:10.5px;padding:2px 3px;background:var(--card);color:var(--ink-2);
+  border:0;border-right:1px solid var(--line-2);cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--nc);color:#fff}
+.example{font-family:var(--mono);font-size:10px;color:var(--muted);margin:-3px 0 9px 0}
+.screebox{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:7px 7px 3px;margin-bottom:9px}
+.screecap{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;color:var(--muted);margin-bottom:1px}
+.screecap b{color:var(--ink-2);font-weight:500}
+.card .ft{display:flex;align-items:center;gap:14px;border-top:1px solid var(--line);padding:6px 11px;
+  background:var(--panel-2)}
+.card .ft button{background:none;border:0;font:inherit;font-size:11.5px;color:var(--ink-2);cursor:pointer;padding:1px 2px}
+.card .ft button:hover{color:var(--ink);text-decoration:underline}
+.card .ft .grow{flex:1}
+.card .ft .solve{border:1px solid var(--line-2);border-radius:5px;padding:2px 9px;font-size:11px;background:var(--card)}
+
+/* Automator notch between stacked cards */
+.notch{position:absolute;left:50%;transform:translateX(-50%);bottom:-16px;width:26px;height:15px;
+  clip-path:polygon(0 0,100% 0,50% 100%);background:var(--line-2);z-index:2}
+.notch::after{content:"";position:absolute;left:1px;right:1px;top:0;height:14px;
+  clip-path:polygon(0 0,100% 0,50% 100%);background:var(--canvas)}
+
+.slot{width:296px;border:1.5px dashed var(--line-2);border-radius:8px;min-height:62px;display:grid;
+  place-items:center;font-family:var(--mono);font-size:10.5px;color:var(--muted);text-align:center;padding:8px;
+  background:transparent}
+.slot.hot{border-color:var(--sel);background:var(--sel-soft);color:var(--sel)}
+.newlane{width:132px;border:1.5px dashed var(--line-2);border-radius:8px;min-height:62px;display:grid;place-items:center;
+  font-family:var(--mono);font-size:10.5px;color:var(--muted);cursor:pointer;background:transparent;padding:8px;text-align:center}
+.newlane:hover{border-color:var(--sel);color:var(--sel)}
+
+/* ---- notes ---- */
+.notes{margin-top:40px;display:grid;grid-template-columns:repeat(auto-fit,minmax(266px,1fr));gap:26px 34px}
+.notes h4{font-family:var(--serif);font-size:19px;font-weight:500;margin:0 0 6px}
+.notes p{margin:0 0 8px;font-size:14px;color:var(--ink-2);max-width:60ch}
+.notes ul{margin:0;padding-left:18px;font-size:14px;color:var(--ink-2)}
+.notes li{margin-bottom:5px}
+.notes code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);
+  border-radius:4px;padding:1px 4px;color:var(--ink-2)}
+footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted)}
+</style>
+
+<div class="wrap">
+<header class="page">
+  <div>
+    <span class="eyebrow">DENNIS · PCA tab concept · option 2</span>
+    <h1>Decomposition Stacks</h1>
+  </div>
+  <p>Automator's shape: steps stack top to bottom, each one feeding the notch below it. The shelf is a
+  horizontal strip of icons you drag down into a stack. Streams sit side by side in fixed levels, so
+  everything on row 2 is a second-stage decomposition no matter which stream it belongs to — and a
+  stream can borrow its input from a card in the lane next door.</p>
+</header>
+
+<div class="app">
+  <div class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <span class="wintitle">TWINS — PCA</span>
+    <div class="tabs"><span class="on">PCA</span><span>Tensor</span><span>PLS</span><span>Stats</span></div>
+  </div>
+
+  <div class="shelf" id="shelf"></div>
+
+  <div class="subbar">
+    <span>Group <b>TWINS / 12mo / Monozygotic</b> · 24 subjects · 6 conditions · 129 ch · −100…900 ms</span>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-collapse">Collapse all</button>
+    <button class="btn" id="btn-run">Run all streams</button>
+  </div>
+
+  <div class="stage">
+    <div class="gutter" id="gutter"></div>
+    <div class="scroller">
+      <div class="grid-wrap">
+        <svg id="links" aria-hidden="true"></svg>
+        <div class="grid" id="grid"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <section>
+    <h4>Levels carry meaning</h4>
+    <p>Row 1 is always the source tensor. Row 2 is a first decomposition of it, row 3 a decomposition of
+    those scores. Reading across a row compares like with like: temporal-first versus spatial-first on the
+    same group, side by side.</p>
+  </section>
+  <section>
+    <h4>Stacking is the wiring</h4>
+    <p>A card takes the card above it as input — no wires to draw for the common case. The only explicit
+    link is a <span class="pill link">cross-stream</span> input, drawn as one arrow, for when a lane
+    branches off something in the lane beside it.</p>
+  </section>
+  <section>
+    <h4>Branching</h4>
+    <p>"Branch" on any card opens a new stream to its right, already fed by that card and starting at the
+    next level down. That is how one temporal PCA feeds both a spatial decomposition and an Infomax run
+    without duplicating the first step.</p>
+  </section>
+  <section>
+    <h4>Same engine underneath</h4>
+    <p>Every decomposition card is one <code>PCACore.doPCA</code>: matrix (COV/COR/SCP), decomposition
+    (SVD/NIPALS), loading, rotation, factor count — with the card's kind choosing the <code>PCAMode</code>
+    used to unfold the <code>EPTensor</code>. Today's <code>TwoStepPCA</code> is a two-card stack.</p>
+  </section>
+  <section>
+    <h4>Open questions</h4>
+    <ul>
+      <li>Should a lane be allowed to skip a level, or does an empty slot always mean "pass through"?</li>
+      <li>Cross-stream links only go left-to-right here — worth allowing either direction?</li>
+      <li>Card widths are fixed; a wide result (topography strip) may want to span the lane below it.</li>
+      <li>Where do saved stacks live — per group, or a study-wide template list?</li>
+    </ul>
+  </section>
+</div>
+
+<footer>Mockup only — no decomposition runs here. Scree bars are synthetic.</footer>
+</div>
+
+<script>
+const KINDS={
+ source:{n:"Group Data",g:"IN",c:"--n-source",lvl:"Source",
+   fields:[["win","Window","text","−100 … 900 ms"],["ds","Downsample","seg",["×1","×2","×4"]],
+           ["base","Baseline","seg",["On","Off"]]],
+   ex:n=>`129 ch × 551 samples × 6 cells × 24 subj`},
+ temporal:{n:"Temporal PCA",g:"TF",c:"--n-temporal",scree:1,
+   fields:[["rot","Rotation","select",["Promax","Varimax","Unrotated","Infomax"]],
+           ["mat","Matrix","seg",["COV","COR","SCP"]],
+           ["load","Loading","select",["Kaiser","None","Covariance","Cureton–Mulaik"]]],
+   ex:n=>`${n.factors} temporal factors → scores per channel`},
+ spatial:{n:"Spatial PCA",g:"SF",c:"--n-spatial",scree:1,
+   fields:[["rot","Rotation","select",["Infomax","Extended Infomax","Promax","Varimax","Unrotated"]],
+           ["mat","Matrix","seg",["COV","COR","SCP"]],
+           ["load","Loading","select",["Kaiser","None","Covariance","Cureton–Mulaik"]]],
+   ex:n=>`${n.factors} spatial factors per temporal factor`},
+ freq:{n:"Frequency PCA",g:"FF",c:"--n-freq",scree:1,
+   fields:[["rot","Rotation","select",["Promax","Varimax","Unrotated"]],
+           ["mat","Matrix","seg",["COV","COR","SCP"]],
+           ["band","Band","text","2 – 40 Hz · 24 log steps"]],
+   ex:n=>`${n.factors} frequency factors (Morlet power)`},
+ ica:{n:"Infomax ICA",g:"IC",c:"--n-ica",
+   fields:[["kind","Algorithm","seg",["Infomax","Extended"]],["comp","Components","number",12],
+           ["iter","Max iter","number",512]],
+   ex:n=>`${n.params.comp} components + mixing matrix`},
+ view:{n:"Factor Viewer",g:"VW",c:"--n-view",
+   fields:[["thr","Loading thr.","number",0.4],
+           ["grp","Group by","select",["Condition","Twin Type","Age","Condition × Twin Type"]]],
+   ex:n=>`topographies · time courses · cluster ERPs`},
+ exportx:{n:"Export / Stats",g:"EX",c:"--n-export",
+   fields:[["what","Contents","select",["Factor scores","Loadings","Both"]],
+           ["dest","Send to","seg",["CSV","Stats tab"]]],
+   ex:n=>`scores + design columns for ANOVA`}
+};
+const SHELF=[["source","Group Data"],["temporal","Temporal"],["spatial","Spatial"],["freq","Frequency"],
+             ["ica","Infomax"],["view","Viewer"],["exportx","Export"]];
+const LEVELS=["Source","Decompose","Decompose","Read out","Read out","Read out"];
+
+let uid=1, streams=[], selId=null, drag=null;
+const grid=document.getElementById("grid"), links=document.getElementById("links"), gutter=document.getElementById("gutter");
+
+function card(kind,over={}){
+  const k=KINDS[kind],p={};
+  k.fields.forEach(f=>{p[f[0]]=f[2]==="seg"?f[3][0]:(f[2]==="select"?f[3][0]:f[3]);});
+  return {id:"c"+(uid++),kind,open:false,factors:3,state:"idle",from:null,params:p,...over,
+          params:Object.assign(p,over.params||{})};
+}
+function findCard(id){for(const s of streams){const c=s.cards.find(c=>c.id===id);if(c)return c;}return null;}
+function locate(id){for(let si=0;si<streams.length;si++){const ci=streams[si].cards.findIndex(c=>c.id===id);
+  if(ci>-1)return{si,ci};}return null;}
+function label(c){return KINDS[c.kind].n;}
+function inputOf(c){
+  const at=locate(c.id); if(!at) return "—";
+  if(c.from){const s=findCard(c.from);return s?`${label(s)} · ${streams[locate(c.from).si].name}`:"—";}
+  if(at.ci>0) return label(streams[at.si].cards[at.ci-1]);
+  return c.kind==="source"?"group tensor":"— no input —";
+}
+function scree(c){const s=c.kind==="spatial"?1.9:c.kind==="freq"?1.55:2.6;
+  return Array.from({length:12},(_,i)=>({ev:100*Math.exp(-i/s)/2.6+0.6,rnd:11*Math.exp(-i/9)}));}
+function markStale(c){ if(c.state==="done") c.state="stale";
+  const at=locate(c.id); if(!at) return;
+  streams[at.si].cards.slice(at.ci+1).forEach(d=>{if(d.state==="done")d.state="stale";});
+  streams.forEach(s=>s.cards.forEach(d=>{if(d.from===c.id&&d.state==="done")d.state="stale";}));}
+
+/* ---------- shelf ---------- */
+const shelf=document.getElementById("shelf");
+SHELF.forEach(([kd,lbl],i)=>{
+  if(i===1||i===5){const s=document.createElement("span");s.className="sep";shelf.appendChild(s);}
+  const k=KINDS[kd],el=document.createElement("div");
+  el.className="tool";el.draggable=true;el.title=k.n;el.style.setProperty("--tc",`var(${k.c})`);
+  el.innerHTML=`<span class="glyph">${k.g}</span><span class="lbl">${lbl}</span>`;
+  el.addEventListener("dragstart",e=>{drag={kind:kd};e.dataTransfer.setData("text/plain",kd);
+    e.dataTransfer.effectAllowed="copy";});
+  el.addEventListener("dragend",()=>{drag=null;});
+  shelf.appendChild(el);
+});
+const sp=document.createElement("span");sp.className="spacer";shelf.appendChild(sp);
+const hint=document.createElement("span");
+hint.style.cssText="font-family:var(--mono);font-size:10.5px;color:var(--muted);max-width:190px;line-height:1.35";
+hint.textContent="Drag an icon into a stack, or onto a card to insert above it.";
+shelf.appendChild(hint);
+
+/* ---------- render ---------- */
+function pad(s){return s.pad||0;}
+function rows(){return Math.max(...streams.map(s=>pad(s)+s.cards.length),1)+1;}
+function render(){
+  const R=rows();
+  grid.style.gridTemplateColumns=streams.map(()=>"296px").join(" ")+" 132px";
+  grid.innerHTML="";
+  streams.forEach((s,si)=>{
+    const head=document.createElement("div");
+    head.className="lanehead";head.style.gridColumn=si+1;head.style.gridRow=1;
+    head.innerHTML=`<span class="nm">${s.name}</span><span class="meta">${s.cards.length} step${s.cards.length===1?"":"s"}</span>`+
+      (streams.length>1?`<button title="Delete stream" data-lane="${si}">✕</button>`:"");
+    grid.appendChild(head);
+    for(let r=0;r<R;r++){
+      const i=r-pad(s), c=i>=0?s.cards[i]:null;
+      if(c){
+        const w=document.createElement("div");w.className="slotwrap";
+        w.style.gridColumn=si+1;w.style.gridRow=r+2;
+        w.appendChild(cardEl(c,si,i));
+        if(s.cards[i+1]){const n=document.createElement("span");n.className="notch";w.appendChild(n);}
+        grid.appendChild(w);
+      } else if(i===s.cards.length){
+        const slot=document.createElement("div");slot.className="slot";
+        slot.style.gridColumn=si+1;slot.style.gridRow=r+2;
+        slot.dataset.lane=si;slot.dataset.at=i;
+        slot.textContent=s.cards.length?`Level ${r+1} — drop a step here`:"Drop Group Data here";
+        grid.appendChild(slot);
+      }
+    }
+  });
+  const nl=document.createElement("button");
+  nl.className="newlane";nl.style.gridColumn=streams.length+1;nl.style.gridRow=2;
+  nl.textContent="+ New stream";nl.id="btn-newlane";
+  grid.appendChild(nl);
+  drawLevels(R); requestAnimationFrame(drawLinks);
+}
+function drawLevels(R){
+  gutter.innerHTML="";
+  const head=document.createElement("div");head.style.height="27px";gutter.appendChild(head);
+  for(let r=0;r<R;r++){
+    const rowEls=[...grid.children].filter(e=>+e.style.gridRow===r+2);
+    const h=Math.max(...rowEls.map(e=>e.offsetHeight),62);
+    const d=document.createElement("div");d.className="lvl";d.style.height=(h+30)+"px";
+    d.innerHTML=`<b>${r+1}</b><span>${LEVELS[r]||"Read out"}</span>`;
+    gutter.appendChild(d);
+  }
+}
+function cardEl(c,si,r){
+  const k=KINDS[c.kind],el=document.createElement("div");
+  el.className="card"+(c.id===selId?" sel":"");
+  el.style.setProperty("--nc",`var(${k.c})`);el.dataset.id=c.id;
+  const st=c.state==="done"?`solved${k.scree?" · "+c.factors+" f":""}`:c.state==="stale"?"stale":"not run";
+  el.innerHTML=`
+    <div class="hd" draggable="true">
+      <button class="tri" aria-label="Expand">${c.open?"▼":"▶"}</button>
+      <span class="icon">${k.g}</span><span class="ttl">${k.n}</span>
+      <button class="x" data-act="del" aria-label="Remove step">✕</button>
+    </div>
+    <div class="summary">
+      <span class="pill${c.from?" link":""}">← ${inputOf(c)}</span>
+      ${k.scree?`<span class="pill">${c.factors} factors</span><span class="pill">${c.params.rot}</span>`:""}
+      <span class="pill state ${c.state}">${st}</span>
+    </div>`;
+  if(c.open){
+    const bd=document.createElement("div");bd.className="bd";
+    if(k.scree) bd.appendChild(screeEl(c));
+    const f=document.createElement("div");f.className="fields";
+    const opts=streams.flatMap((s,i)=>s.cards.filter(d=>d.id!==c.id).map(d=>
+      `<option value="${d.id}"${c.from===d.id?" selected":""}>${s.name} · ${label(d)}</option>`)).join("");
+    f.innerHTML=`<label>Input</label><select data-f="__from">
+        <option value=""${c.from?"":" selected"}>Card above (${inputOf(Object.assign({},c,{from:null}))})</option>
+        ${opts}</select>`;
+    k.fields.forEach(([key,lab,type,val])=>{
+      let ctl;
+      if(type==="seg") ctl=`<span class="seg">`+val.map(v=>
+        `<button data-seg="${key}" data-v="${v}" aria-pressed="${c.params[key]===v}">${v}</button>`).join("")+`</span>`;
+      else if(type==="select") ctl=`<select data-f="${key}">`+val.map(v=>
+        `<option${c.params[key]===v?" selected":""}>${v}</option>`).join("")+`</select>`;
+      else if(type==="number") ctl=`<input type="number" data-f="${key}" value="${c.params[key]}" step="any">`;
+      else ctl=`<input type="text" data-f="${key}" value="${c.params[key]}">`;
+      f.insertAdjacentHTML("beforeend",`<label>${lab}</label>${ctl}`);
+    });
+    bd.appendChild(f);
+    bd.insertAdjacentHTML("beforeend",`<div class="example">Output: ${k.ex(c)}</div>`);
+    el.appendChild(bd);
+  }
+  const ft=document.createElement("div");ft.className="ft";
+  ft.innerHTML=`<button data-act="results">Results</button><button data-act="branch">Branch</button>
+    <span class="grow"></span><button class="solve" data-act="run">${k.scree?"Solve":"Run"}</button>`;
+  el.appendChild(ft);
+  return el;
+}
+function screeEl(c){
+  const data=scree(c),W=252,H=74,pad=15,bw=W/data.length,max=Math.max(...data.map(d=>d.ev));
+  let bars="",line="";
+  data.forEach((d,i)=>{
+    const h=(d.ev/max)*(H-pad),x=i*bw+2,y=H-pad-h,on=i<c.factors;
+    bars+=`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw-4).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5"
+      fill="var(--nc)" fill-opacity="${on?0.9:0.2}" data-bar="${i}" style="cursor:pointer"></rect>
+      <text x="${(x+bw/2-2).toFixed(1)}" y="${H-4}" text-anchor="middle" font-size="7"
+        font-family="IBM Plex Mono, monospace" fill="var(--muted)">${i+1}</text>`;
+    line+=`${i?"L":"M"}${(x+bw/2-2).toFixed(1)},${(H-pad-(d.rnd/max)*(H-pad)).toFixed(1)}`;
+  });
+  const cut=c.factors*bw, pct=Math.round(data.slice(0,c.factors).reduce((a,b)=>a+b.ev,0)/
+    data.reduce((a,b)=>a+b.ev,0)*100);
+  const box=document.createElement("div");box.className="screebox";
+  box.innerHTML=`<div class="screecap"><span>Scree · parallel analysis</span><span><b>${pct}%</b> var.</span></div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img"
+      aria-label="Scree plot; click a bar to set retained factors">${bars}
+      <path d="${line}" fill="none" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 2"></path>
+      <line x1="${cut.toFixed(1)}" y1="0" x2="${cut.toFixed(1)}" y2="${H-pad}" stroke="var(--sel)" stroke-width="1.5"></line>
+      <text x="${Math.min(cut+4,W-38).toFixed(1)}" y="9" font-size="7.5" font-family="IBM Plex Mono, monospace"
+        fill="var(--sel)">keep ${c.factors}</text></svg>`;
+  box.querySelectorAll("[data-bar]").forEach(b=>b.addEventListener("click",()=>{
+    c.factors=+b.dataset.bar+1;markStale(c);render();}));
+  return box;
+}
+function drawLinks(){
+  const wrap=grid.parentElement.getBoundingClientRect();
+  links.setAttribute("width",grid.offsetWidth+40);links.setAttribute("height",grid.offsetHeight+40);
+  let d="";
+  streams.forEach(s=>s.cards.forEach(c=>{
+    if(!c.from) return;
+    const a=grid.querySelector(`.card[data-id="${c.from}"]`),b=grid.querySelector(`.card[data-id="${c.id}"]`);
+    if(!a||!b) return;
+    const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
+    const x1=ar.right-wrap.left, y1=ar.top-wrap.top+18, x2=br.left-wrap.left-3, y2=br.top-wrap.top+18;
+    d+=`<path d="M${x1},${y1} C${x1+22},${y1} ${x2-22},${y2} ${x2},${y2}" fill="none" stroke="var(--sel)"
+      stroke-width="1.6" stroke-dasharray="5 3"></path>
+      <circle cx="${x2}" cy="${y2}" r="2.8" fill="var(--sel)"></circle>`;
+  }));
+  links.innerHTML=d;
+}
+
+/* ---------- drops ---------- */
+grid.addEventListener("dragover",e=>{
+  const slot=e.target.closest(".slot"),card=e.target.closest(".card");
+  if(!drag||(!slot&&!card))return;
+  e.preventDefault();e.dataTransfer.dropEffect=drag.move?"move":"copy";
+  grid.querySelectorAll(".hot").forEach(x=>x.classList.remove("hot"));
+  (slot||card).classList.add("hot");
+  if(card)card.style.boxShadow="0 -3px 0 var(--sel), var(--shadow)";
+});
+grid.addEventListener("dragleave",e=>{
+  const t=e.target.closest(".slot,.card"); if(t){t.classList.remove("hot");t.style.boxShadow="";}
+});
+grid.addEventListener("drop",e=>{
+  const slot=e.target.closest(".slot"),onCard=e.target.closest(".card");
+  if(!drag||(!slot&&!onCard))return;
+  e.preventDefault();
+  grid.querySelectorAll(".card").forEach(x=>x.style.boxShadow="");
+  let si,at;
+  if(slot){si=+slot.dataset.lane;at=+slot.dataset.at;}
+  else{const l=locate(onCard.dataset.id);si=l.si;at=l.ci;}
+  if(drag.move){
+    const from=locate(drag.id);const [c]=streams[from.si].cards.splice(from.ci,1);
+    if(from.si===si&&from.ci<at)at--;
+    streams[si].cards.splice(Math.min(at,streams[si].cards.length),0,c);selId=c.id;
+  }else{
+    const c=card(drag.kind);streams[si].cards.splice(Math.min(at,streams[si].cards.length),0,c);
+    selId=c.id;c.open=true;
+  }
+  drag=null;render();
+});
+grid.addEventListener("dragstart",e=>{
+  const hd=e.target.closest(".hd"); if(!hd)return;
+  const c=hd.closest(".card");drag={move:1,id:c.dataset.id};
+  e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",c.dataset.id);
+  c.classList.add("ghost");
+});
+grid.addEventListener("dragend",e=>{grid.querySelectorAll(".ghost").forEach(x=>x.classList.remove("ghost"));drag=null;});
+
+/* ---------- clicks + edits ---------- */
+grid.addEventListener("click",e=>{
+  const laneX=e.target.closest("[data-lane]:not(.slot)");
+  if(laneX&&laneX.tagName==="BUTTON"){const i=+laneX.dataset.lane;
+    const ids=streams[i].cards.map(c=>c.id);streams.splice(i,1);
+    streams.forEach(s=>s.cards.forEach(c=>{if(ids.includes(c.from))c.from=null;}));render();return;}
+  if(e.target.id==="btn-newlane"){
+    streams.push({id:"s"+(uid++),name:"Stream "+String.fromCharCode(65+streams.length),cards:[]});render();return;}
+  const cardEl2=e.target.closest(".card"); if(!cardEl2)return;
+  const c=findCard(cardEl2.dataset.id); selId=c.id;
+  if(e.target.closest(".tri")){c.open=!c.open;render();return;}
+  const seg=e.target.closest("[data-seg]");
+  if(seg){c.params[seg.dataset.seg]=seg.dataset.v;markStale(c);render();return;}
+  const act=e.target.closest("[data-act]")?.dataset.act;
+  if(act==="del"){const at=locate(c.id);streams[at.si].cards.splice(at.ci,1);
+    streams.forEach(s=>s.cards.forEach(d=>{if(d.from===c.id)d.from=null;}));selId=null;}
+  else if(act==="run"){c.state="done";}
+  else if(act==="results"){c.open=true;}
+  else if(act==="branch"){
+    // A branch starts one level below the card it borrows from, so rows stay meaningful.
+    const at=locate(c.id);
+    const nc=card(c.kind==="temporal"?"spatial":"temporal",{from:c.id,open:true});
+    streams.push({id:"s"+(uid++),name:"Stream "+String.fromCharCode(65+streams.length),
+      pad:at.ci+1+(streams[at.si].pad||0),cards:[nc]});
+    selId=nc.id;
+  }
+  render();
+});
+grid.addEventListener("change",e=>{
+  const f=e.target.closest("[data-f]"); if(!f)return;
+  const c=findCard(e.target.closest(".card").dataset.id);
+  if(f.dataset.f==="__from") c.from=f.value||null; else c.params[f.dataset.f]=f.value;
+  markStale(c);render();
+});
+document.getElementById("btn-collapse").addEventListener("click",()=>{
+  const any=streams.some(s=>s.cards.some(c=>c.open));
+  streams.forEach(s=>s.cards.forEach(c=>c.open=!any));render();});
+document.getElementById("btn-run").addEventListener("click",()=>{
+  streams.forEach(s=>s.cards.forEach(c=>c.state="done"));render();});
+window.addEventListener("resize",()=>requestAnimationFrame(drawLinks));
+
+/* ---------- opening state ---------- */
+streams=[
+ {id:"sA",name:"Stream A · classic dual",cards:[
+   card("source",{state:"done"}),
+   card("temporal",{state:"done",factors:4,open:true,params:{rot:"Promax",mat:"COV",load:"Kaiser"}}),
+   card("spatial",{state:"done",factors:3,params:{rot:"Infomax",mat:"COV",load:"Kaiser"}}),
+   card("view",{state:"done"})]},
+ {id:"sB",name:"Stream B · spatial first",cards:[
+   card("source",{state:"done"}),
+   card("spatial",{state:"done",factors:5,params:{rot:"Promax",mat:"COR",load:"Kaiser"}}),
+   card("temporal",{state:"stale",factors:4}),
+   card("exportx",{state:"idle"})]},
+ {id:"sC",name:"Stream C · ICA check",pad:2,cards:[
+   card("ica",{state:"idle",params:{kind:"Extended",comp:12,iter:512}})]}
+];
+streams[2].cards[0].from=streams[0].cards[1].id;
+selId=streams[0].cards[1].id;
+render();
+</script>
